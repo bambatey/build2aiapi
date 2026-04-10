@@ -1,41 +1,51 @@
-from contextlib import asynccontextmanager
 import os
 from pathlib import Path
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from opensearchpy import AsyncOpenSearch, RequestsHttpConnection
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings
-import aiohttp
-from typing import Optional
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 class AppConfig(BaseSettings):
     """Uygulama konfigürasyon ayarları"""
 
-    # ---! OpenRouter API Key
+    # ---! Firebase
+    firebase_credentials_path: str = Field(
+        default="build2ai-firebase-adminsdk-fbsvc-3d1630b69e.json",
+        description="Firebase service account JSON dosya yolu",
+    )
+    firebase_storage_bucket: str = Field(
+        default="build2ai.firebasestorage.app",
+        description="Firebase Storage bucket adı",
+    )
+
+    # ---! LLM / OpenRouter
     openrouter_api_key: str = Field(
-        description="OpenRouter API anahtarı. OpenRouter üzerinden dil modeli çağrıları için gereklidir."
+        default="",
+        description="OpenRouter API anahtarı",
+    )
+    default_llm_model: str = Field(
+        default="anthropic/claude-sonnet-4-20250514",
+        description="Varsayılan LLM modeli",
     )
 
-    # ---! DSPy LM Model
-    dspy_lm_model: str = Field(
-        default="gpt-4o",
-        description="DSPy ile kullanılacak dil modeli. Örneğin: 'gpt-4o', 'gpt-3.5-turbo', vb.",
+    # ---! Uygulama
+    port: int = Field(default=8000)
+    cors_origins: list[str] = Field(
+        default=["http://localhost:3000", "http://localhost:3001"],
+        description="İzin verilen CORS origin'leri",
     )
 
-    # ---! Uygulama Portu
-    port: int = Field(
-        default=8000,
-        description="FastAPI uygulamasının çalışacağı port numarası"
-    )
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
 
-    @field_validator("openrouter_api_key", mode="before")
-    @classmethod
-    def validate_openrouter_api_key(cls, v):
-        if not v:
-            raise ValueError("OPENROUTER_API_KEY environment variable is required")
-        return v
+
+def get_config() -> AppConfig:
+    project_root = Path(__file__).parent.parent
+    env_path = project_root / ".env"
+    if env_path.exists():
+        from dotenv import load_dotenv
+        load_dotenv(env_path)
+    return AppConfig()
+
+
+app_config = get_config()

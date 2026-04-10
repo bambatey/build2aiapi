@@ -4,6 +4,9 @@ from pydantic import BaseModel, Field
 
 dspy.configure_cache(enable_memory_cache=False, enable_disk_cache=False)
 
+
+
+
 class StateAnalysisDto(BaseModel):
     """State analiz sonuçları için Pydantic model"""
 

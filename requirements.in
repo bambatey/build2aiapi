@@ -1,0 +1,17 @@
+# Web framework
+fastapi
+uvicorn
+
+# Firebase
+firebase-admin
+
+# HTTP client (LLM streaming)
+httpx
+
+# Config
+pydantic
+pydantic-settings
+python-dotenv
+
+# File upload
+python-multipart
