@@ -13,12 +13,16 @@ class ProjectRepository:
         return firebase_service.db.collection("users").document(uid).collection("projects")
 
     async def list_by_user(self, uid: str) -> list[dict]:
-        docs = self._collection(uid).order_by("updated_at", direction="DESCENDING").stream()
+        # order_by kullanmıyoruz — bazı dokümanlar updated_at field'ına sahip olmayabilir
+        docs = self._collection(uid).stream()
         projects = []
         for doc in docs:
             data = doc.to_dict()
-            data["id"] = doc.id
-            projects.append(data)
+            if data:  # boş dokümanları atla
+                data["id"] = doc.id
+                projects.append(data)
+        # Client-side sırala
+        projects.sort(key=lambda p: p.get("updated_at", p.get("created_at", "")), reverse=True)
         return projects
 
     async def get(self, uid: str, project_id: str) -> dict | None:

@@ -14,10 +14,39 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: Firebase init / Shutdown: cleanup."""
+    """Startup: Firebase + DSPy init / Shutdown: cleanup."""
     logger.info("Uygulama başlatılıyor...")
     firebase_service.initialize()
     logger.info("Firebase Admin SDK hazır")
+
+    # ---! DSPy LM yapılandır
+    if app_config.llm_api_key:
+        import dspy
+        provider = app_config.llm_provider
+        model_name = app_config.default_llm_model
+
+        if provider == "replicate":
+            lm = dspy.LM(
+                model=f"replicate/{model_name}",
+                api_key=app_config.llm_api_key,
+            )
+        elif provider == "gemini":
+            lm = dspy.LM(
+                model=f"gemini/{model_name}",
+                api_key=app_config.llm_api_key,
+            )
+        elif provider == "openrouter":
+            lm = dspy.LM(
+                model=f"openrouter/{model_name}",
+                api_key=app_config.llm_api_key,
+                api_base="https://openrouter.ai/api/v1",
+            )
+        else:
+            lm = dspy.LM(model=model_name, api_key=app_config.llm_api_key)
+
+        dspy.configure(lm=lm)
+        logger.info(f"DSPy LM yapılandırıldı: {provider}/{model_name}")
+
     yield
     logger.info("Uygulama kapatılıyor...")
 

@@ -17,13 +17,17 @@ class AppConfig(BaseSettings):
         description="Firebase Storage bucket adı",
     )
 
-    # ---! LLM / OpenRouter
-    openrouter_api_key: str = Field(
+    # ---! LLM
+    llm_provider: str = Field(
+        default="gemini",
+        description="LLM provider: 'gemini' veya 'openrouter'",
+    )
+    llm_api_key: str = Field(
         default="",
-        description="OpenRouter API anahtarı",
+        description="LLM API anahtarı (Gemini veya OpenRouter)",
     )
     default_llm_model: str = Field(
-        default="anthropic/claude-sonnet-4-20250514",
+        default="gemini-2.0-flash",
         description="Varsayılan LLM modeli",
     )
 
@@ -37,6 +41,7 @@ class AppConfig(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 def get_config() -> AppConfig:

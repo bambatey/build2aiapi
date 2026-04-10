@@ -61,15 +61,15 @@ class ChatRepository:
         return data
 
     async def update_session_activity(self, uid: str, project_id: str, session_id: str) -> None:
-        self._sessions_col(uid, project_id).document(session_id).update({
+        self._sessions_col(uid, project_id).document(session_id).set({
             "last_active": datetime.utcnow(),
-        })
+        }, merge=True)
 
     async def rename_session(self, uid: str, project_id: str, session_id: str, name: str) -> None:
-        self._sessions_col(uid, project_id).document(session_id).update({
+        self._sessions_col(uid, project_id).document(session_id).set({
             "name": name,
             "last_active": datetime.utcnow(),
-        })
+        }, merge=True)
 
     async def delete_session(self, uid: str, project_id: str, session_id: str) -> None:
         self._sessions_col(uid, project_id).document(session_id).delete()
