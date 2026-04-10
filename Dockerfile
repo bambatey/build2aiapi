@@ -14,10 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Application code
 COPY src/ ./src/
 
-# Firebase credentials (runtime'da mount veya env ile verilecek)
-# COPY build2ai-firebase-adminsdk-*.json .
+# Firebase credentials ve .env dosyası
+COPY build2ai-firebase-adminsdk-*.json .
+COPY .env .
+
+WORKDIR /app/src
 
 EXPOSE 8000
 
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
-WORKDIR /app/src
