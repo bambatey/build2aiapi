@@ -60,6 +60,18 @@ async def create_session(
     )
 
 
+@router.put("/api/chat/sessions/{session_id}/rename", response_model=BusinessLogicDto)
+async def rename_session(
+    session_id: str,
+    request: ChatSessionCreateRequest,
+    project_id: str = Query(...),
+    uid: str = Depends(get_uid),
+):
+    """Oturum ismini güncelle."""
+    await chat_repository.rename_session(uid, project_id, session_id, request.name)
+    return BusinessLogicDto(success=True, data={"id": session_id, "name": request.name})
+
+
 @router.get("/api/chat/sessions/{session_id}/messages", response_model=BusinessLogicDto)
 async def list_messages(
     session_id: str,
@@ -109,7 +121,9 @@ async def chat_stream(
 
     # Streaming response oluştur
     async def generate():
+        import json as json_mod
         full_content = ""
+
         async for chunk in chat_service.stream_chat(
             messages=request.messages,
             model=request.model,
@@ -117,14 +131,14 @@ async def chat_stream(
         ):
             yield chunk
             # İçeriği biriktir (DB'ye kaydetmek için)
-            if '"type": "delta"' in chunk or '"type":"delta"' in chunk:
-                import json
-                try:
-                    data_str = chunk.replace("data: ", "").strip()
-                    parsed = json.loads(data_str)
-                    full_content += parsed.get("content", "")
-                except Exception:
-                    pass
+            try:
+                data_str = chunk.replace("data: ", "").strip()
+                if data_str:
+                    parsed = json_mod.loads(data_str)
+                    if parsed.get("type") == "delta":
+                        full_content += parsed.get("content", "")
+            except Exception:
+                pass
 
         # AI yanıtını DB'ye kaydet
         if full_content:
@@ -134,6 +148,7 @@ async def chat_stream(
                 session_id=request.session_id,
                 role="assistant",
                 content=full_content,
+                diff=None,
                 model=request.model,
             )
 

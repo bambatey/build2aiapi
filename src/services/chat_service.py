@@ -70,23 +70,17 @@ class ChatService:
                 StructuralChatResponse,
             )
 
-            # Conversation history oluştur (son mesaj hariç)
+            # Son kullanıcı mesajını al
             history_msgs = [m for m in messages if m["role"] != "system"]
             user_question = history_msgs[-1]["content"] if history_msgs else ""
 
-            conversation_history = "\n".join(
-                f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-                for m in history_msgs[:-1]
-            ) or "İlk mesaj"
+            # Dosya içeriğini kısalt (token limiti için)
+            file_content = file_context[:30000] if file_context else "Dosya yüklenmemiş"
 
-            file_content = file_context[:50000] if file_context else "Dosya yüklenmemiş"
-
-            # DSPy çağrısı (sync — asyncio.to_thread ile async yap)
             predict = dspy.Predict(StructuralChatSignature)
 
             def run_predict():
                 return predict(
-                    conversation_history=conversation_history,
                     user_question=user_question,
                     file_content=file_content,
                 )
@@ -99,56 +93,150 @@ class ChatService:
             # Structured response'u parse et
             response: StructuralChatResponse = result.response
 
-            # Ana yanıtı markdown formatında oluştur
+            # Debug log
+            logger.info(f"DSPy yanıt alındı — answer: {len(response.answer)} char")
+            logger.info(f"DSPy updated_tables: {len(response.updated_tables)} char")
+            logger.info(f"DSPy change_summary: '{response.change_summary}'")
+
+            # Ana yanıt
             full_content = response.answer
 
-            # Bulgular
-            if response.findings:
-                full_content += "\n\n### Bulgular\n"
-                for f in response.findings:
-                    full_content += f"- {f}\n"
-
-            # Öneriler
-            if response.recommendations:
-                full_content += "\n\n### Öneriler\n"
-                for r in response.recommendations:
-                    full_content += f"- {r}\n"
-
-            # Yönetmelik referansları
-            if response.code_references:
-                full_content += "\n\n### Yönetmelik Referansları\n"
-                for ref in response.code_references:
-                    full_content += f"- **{ref.code_name}** {ref.section}: {ref.description}\n"
-
-            # Uyarı
-            if response.warning:
-                full_content += f"\n\n> **Uyarı:** {response.warning}\n"
-
-            # Güven skoru
-            full_content += f"\n\n---\n*Güven skoru: {response.confidence:.0%} | Analiz türü: {response.analysis_type}*"
-
-            # İçeriği chunk'lar halinde gönder (streaming hissi)
+            # İçeriği chunk'lar halinde gönder
             chunk_size = 50
             for i in range(0, len(full_content), chunk_size):
                 chunk = full_content[i:i + chunk_size]
                 yield f"data: {ApiStreamingResponse(type='delta', content=chunk, isComplete=False).model_dump_json()}\n\n"
-                await asyncio.sleep(0.02)  # Küçük gecikme ile streaming hissi
+                await asyncio.sleep(0.02)
 
-            # Dosya değişiklik önerileri varsa, diff olarak ekle
-            if response.suggested_changes:
-                diff_content = "\n\n### Önerilen Değişiklikler\n```diff\n"
-                for change in response.suggested_changes:
-                    diff_content += f"# Satır {change.line_number}: {change.reason}\n"
-                    diff_content += f"- {change.old_value}\n"
-                    diff_content += f"+ {change.new_value}\n"
-                diff_content += "```\n"
-                yield f"data: {ApiStreamingResponse(type='delta', content=diff_content, isComplete=False).model_dump_json()}\n\n"
+            # Dosya güncellemesi varsa — tabloları orijinal dosyaya merge et
+            if response.updated_tables and response.updated_tables.strip() and file_content != "Dosya yüklenmemiş":
+                merged = self._merge_tables(file_content, response.updated_tables)
+
+                if response.change_summary:
+                    summary_content = f"\n\n### Dosya Güncellendi\n{response.change_summary}\n"
+                    yield f"data: {ApiStreamingResponse(type='delta', content=summary_content, isComplete=False).model_dump_json()}\n\n"
+
+                yield f"data: {ApiStreamingResponse(type='file_update', content=merged, isComplete=False).model_dump_json()}\n\n"
+                logger.info(f"Dosya merge edildi: {len(file_content)} → {len(merged)} char")
 
         except Exception as e:
             logger.error(f"DSPy hatası: {e}", exc_info=True)
             yield f"data: {ApiStreamingResponse(type='delta', content=f'DSPy analiz hatası: {str(e)}', isComplete=False).model_dump_json()}\n\n"
 
         yield f"data: {ApiStreamingResponse(type='finish', isComplete=True).model_dump_json()}\n\n"
+
+    @staticmethod
+    def _merge_tables(original: str, updated_tables: str) -> str:
+        """
+        AI'ın ürettiği TABLE bloklarını orijinal dosyaya merge eder.
+        - Aynı isimli tablo varsa → AI'ın satırlarını mevcut tabloya EKLE (append)
+        - Yeni tablo ise → END TABLE DATA'dan önce ekle
+        - Duplicate satırları engelle (aynı Joint= veya Frame= varsa ekleme)
+        """
+        import re
+
+        def extract_table_rows(text: str) -> dict[str, list[str]]:
+            """Metinden TABLE adı → veri satırları dict'i çıkar."""
+            tables: dict[str, list[str]] = {}
+            current_name = None
+
+            for line in text.split('\n'):
+                match = re.match(r'^\s*TABLE:\s*"([^"]+)"', line)
+                if match:
+                    current_name = match.group(1)
+                    if current_name not in tables:
+                        tables[current_name] = []
+                    continue
+
+                if current_name and line.strip() and not line.strip().startswith('$'):
+                    if line.strip() == 'END TABLE DATA':
+                        current_name = None
+                        continue
+                    tables[current_name].append(line.rstrip())
+
+            return tables
+
+        def get_row_key(line: str) -> str | None:
+            """Satırdan unique key çıkar (Joint=X, Frame=X gibi)."""
+            m = re.match(r'\s*(Joint|Frame|Area|LoadPat|Material|SectionName)=(\S+)', line)
+            if m:
+                return f"{m.group(1)}={m.group(2)}"
+            return None
+
+        new_tables = extract_table_rows(updated_tables)
+        if not new_tables:
+            return original
+
+        # Orijinal dosyadaki mevcut satır key'lerini tabloya göre topla
+        orig_tables = extract_table_rows(original)
+
+        # Orijinal dosyayı satır satır işle, ilgili tablo sonuna yeni satırları ekle
+        result_lines = []
+        original_lines = original.split('\n')
+        appended_tables: set[str] = set()
+        current_table: str | None = None
+        i = 0
+
+        while i < len(original_lines):
+            line = original_lines[i]
+            table_match = re.match(r'^\s*TABLE:\s*"([^"]+)"', line)
+
+            if table_match:
+                current_table = table_match.group(1)
+                result_lines.append(line)
+                i += 1
+                continue
+
+            # Yeni tablo başlıyor veya END TABLE DATA — mevcut tabloya ekleme yap
+            next_is_new_table = False
+            if i + 1 < len(original_lines):
+                next_is_new_table = bool(re.match(r'^\s*TABLE:\s*"', original_lines[i + 1]))
+
+            is_empty_before_next = (
+                line.strip() == '' and
+                i + 1 < len(original_lines) and
+                (next_is_new_table or original_lines[i + 1].strip() == 'END TABLE DATA')
+            )
+
+            if (is_empty_before_next or line.strip() == 'END TABLE DATA') and current_table and current_table in new_tables and current_table not in appended_tables:
+                # Mevcut tablodaki key'leri topla
+                existing_keys = set()
+                for orig_row in orig_tables.get(current_table, []):
+                    key = get_row_key(orig_row)
+                    if key:
+                        existing_keys.add(key)
+
+                # AI'ın yeni satırlarını ekle (duplicate olmayanları)
+                new_rows = new_tables[current_table]
+                added = 0
+                for new_row in new_rows:
+                    row_key = get_row_key(new_row)
+                    if row_key and row_key in existing_keys:
+                        continue  # Zaten var, ekleme
+                    result_lines.append(new_row)
+                    added += 1
+
+                appended_tables.add(current_table)
+                logger.info(f"Merge: {current_table} tablosuna {added} satır eklendi")
+
+            if line.strip() == 'END TABLE DATA':
+                # Tamamen yeni tabloları ekle
+                for name, rows in new_tables.items():
+                    if name not in appended_tables and name not in orig_tables:
+                        result_lines.append('')
+                        result_lines.append(f'TABLE:  "{name}"')
+                        for row in rows:
+                            result_lines.append(row)
+                        result_lines.append('')
+                        appended_tables.add(name)
+                        logger.info(f"Merge: Yeni tablo eklendi: {name} ({len(rows)} satır)")
+
+                current_table = None
+
+            result_lines.append(line)
+            i += 1
+
+        return '\n'.join(result_lines)
 
     # -------------------------------------------------------------------
     # OpenAI-compatible streaming (Gemini, OpenRouter)

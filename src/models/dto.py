@@ -23,11 +23,12 @@ class BusinessLogicDto(BaseModel, Generic[T]):
 # Streaming SSE response  (frontend: ApiStreamingResponse<T>)
 # ---------------------------------------------------------------------------
 class ApiStreamingResponse(BaseModel):
-    type: Literal["delta", "finish", "done"] = "delta"
+    type: Literal["delta", "finish", "done", "file_update"] = "delta"
     content: str = ""
     reasoning: str = ""
     isComplete: bool = False
     error: str | None = None
+    file_changes: list[dict[str, Any]] | None = None  # [{line_number, old_value, new_value, reason}]
 
 
 # ---------------------------------------------------------------------------
