@@ -32,6 +32,11 @@ class NodeDTO(BaseModel):
     settlements: dict[str, float] | None = None
     # Frame düğümü için lokal eksen Euler açıları [betaZ, betaY, betaX] (derece)
     euler_zyx: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Aks ve kat etiketleri — GRID LINES tablosundan en yakın grid'e atanır.
+    # Örn: axis_x="B", axis_y="3", level="Z2"
+    axis_x: str | None = None
+    axis_y: str | None = None
+    level: str | None = None
 
 
 class MaterialDTO(BaseModel):

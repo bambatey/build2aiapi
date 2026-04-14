@@ -84,6 +84,7 @@ class S2KParser:
         self._parse_frame_sections(tables, model)
         self._parse_shell_sections(tables, model)
         self._parse_nodes(tables, model)
+        self._assign_grid_labels(tables, model)
         self._parse_restraints(tables, model)
         self._parse_frame_elements(tables, model)
         self._parse_frame_assignments(tables, model)
@@ -98,6 +99,57 @@ class S2KParser:
         self._parse_combinations(tables, model)
         self._parse_mass_source(tables, model)
         return model
+
+    # ------------------------------------------------- GRID LINES → aks
+    def _assign_grid_labels(self, tables, model: ModelDTO) -> None:
+        """``GRID LINES`` tablosunu okuyup her düğüme en yakın aks/kat etiketi ata.
+
+        SAP konvansiyonu:
+            AxisDir=X  GridID=A   XRYZCoord=0.0   →  X=0'da "A" aksı (düşey)
+            AxisDir=Y  GridID=1   XRYZCoord=0.0   →  Y=0'da "1" aksı (yatay)
+            AxisDir=Z  GridID=Z2  XRYZCoord=3.5   →  Z=3.5'te "Z2" katı
+
+        Düğüm koordinatına en yakın grid (tolerans 0.3 m) etiketlenir.
+        Tolerans dışıysa etiket atanmaz (None kalır).
+        """
+        rows = tables.get("GRID LINES", [])
+        if not rows:
+            return
+
+        x_grids: list[tuple[str, float]] = []
+        y_grids: list[tuple[str, float]] = []
+        z_grids: list[tuple[str, float]] = []
+        for row in rows:
+            axis = (row.get("AxisDir") or "").strip().upper()
+            gid = row.get("GridID")
+            coord = to_float(row.get("XRYZCoord"))
+            if not gid or not math.isfinite(coord):
+                continue
+            if axis == "X":
+                x_grids.append((gid, coord))
+            elif axis == "Y":
+                y_grids.append((gid, coord))
+            elif axis == "Z":
+                z_grids.append((gid, coord))
+
+        TOL = 0.30   # 30 cm tolerans
+
+        def closest(grids: list[tuple[str, float]], val: float) -> str | None:
+            if not grids:
+                return None
+            best_id = None
+            best_d = float("inf")
+            for gid, coord in grids:
+                d = abs(coord - val)
+                if d < best_d:
+                    best_d = d
+                    best_id = gid
+            return best_id if best_d <= TOL else None
+
+        for node in model.nodes.values():
+            node.axis_x = closest(x_grids, node.x)
+            node.axis_y = closest(y_grids, node.y)
+            node.level = closest(z_grids, node.z)
 
     # ----------------------------------------------------- MASS SOURCE
     def _parse_mass_source(self, tables, model: ModelDTO) -> None:

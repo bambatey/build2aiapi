@@ -94,6 +94,10 @@ class NodeDisplacementDto(BaseModel):
     rx: float
     ry: float
     rz: float
+    # GRID LINES'a göre aks/kat etiketleri (varsa)
+    axis_x: str | None = None
+    axis_y: str | None = None
+    level: str | None = None
 
 
 class ReactionDto(BaseModel):
@@ -105,6 +109,9 @@ class ReactionDto(BaseModel):
     mx: float
     my: float
     mz: float
+    axis_x: str | None = None
+    axis_y: str | None = None
+    level: str | None = None
 
 
 class AnalysisListItemDto(BaseModel):

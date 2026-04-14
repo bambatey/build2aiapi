@@ -23,10 +23,19 @@ logger = logging.getLogger(__name__)
 
 def analysis_to_persistable(result: AnalysisResult) -> dict[str, Any]:
     """Analiz sonucunu Firestore'a yazılabilir sözlüğe çevir."""
+    # Düğüm ID → aks etiketleri sözlüğü (her recovery satırına eklenir)
+    node_labels = {
+        nid: {
+            "axis_x": n.axis_x,
+            "axis_y": n.axis_y,
+            "level": n.level,
+        }
+        for nid, n in result.model.nodes.items()
+    }
     return {
         "summary": result.summary,
         "cases": {
-            case_id: _case_to_persistable(case)
+            case_id: _case_to_persistable(case, node_labels)
             for case_id, case in result.cases.items()
             if case_id != "_empty"
         },
@@ -66,8 +75,15 @@ def case_summary_dict(case: CaseResult) -> dict[str, Any]:
     }
 
 
-def case_displacements_dict(case: CaseResult) -> list[dict[str, Any]]:
-    """Her düğüm için yer değiştirme kaydı — NodeDisplacementDTO uyumlu."""
+def case_displacements_dict(
+    case: CaseResult,
+    node_labels: dict[int, dict[str, str | None]] | None = None,
+) -> list[dict[str, Any]]:
+    """Her düğüm için yer değiştirme kaydı — NodeDisplacementDTO uyumlu.
+
+    ``node_labels`` verilirse aks/kat etiketleri (axis_x, axis_y, level)
+    her satıra eklenir.
+    """
     out = []
     nan_count = 0
     for nid, disp in sorted(case.displacements.items()):
@@ -77,7 +93,10 @@ def case_displacements_dict(case: CaseResult) -> list[dict[str, Any]]:
             clean[k] = cv
             if was_bad:
                 nan_count += 1
-        out.append({"node_id": nid, "load_case": case.case_id, **clean})
+        record = {"node_id": nid, "load_case": case.case_id, **clean}
+        if node_labels and nid in node_labels:
+            record.update(node_labels[nid])
+        out.append(record)
     if nan_count:
         logger.warning(
             "Case %s: %d yer değiştirme değeri NaN/inf — 0.0'a düşürüldü "
@@ -87,7 +106,10 @@ def case_displacements_dict(case: CaseResult) -> list[dict[str, Any]]:
     return out
 
 
-def case_reactions_dict(case: CaseResult) -> list[dict[str, Any]]:
+def case_reactions_dict(
+    case: CaseResult,
+    node_labels: dict[int, dict[str, str | None]] | None = None,
+) -> list[dict[str, Any]]:
     """Her mesnet için reaksiyon kaydı — ReactionDTO uyumlu."""
     out = []
     nan_count = 0
@@ -98,7 +120,10 @@ def case_reactions_dict(case: CaseResult) -> list[dict[str, Any]]:
             clean[k] = cv
             if was_bad:
                 nan_count += 1
-        out.append({"node_id": nid, "load_case": case.case_id, **clean})
+        record = {"node_id": nid, "load_case": case.case_id, **clean}
+        if node_labels and nid in node_labels:
+            record.update(node_labels[nid])
+        out.append(record)
     if nan_count:
         logger.warning(
             "Case %s: %d reaksiyon değeri NaN/inf — 0.0'a düşürüldü",
@@ -118,11 +143,14 @@ def _safe(v: float) -> float:
     return _sanitize(v)[0]
 
 
-def _case_to_persistable(case: CaseResult) -> dict[str, Any]:
+def _case_to_persistable(
+    case: CaseResult,
+    node_labels: dict[int, dict[str, str | None]] | None = None,
+) -> dict[str, Any]:
     return {
         "case_id": case.case_id,
         "kind": getattr(case, "kind", "case"),
-        "displacements": case_displacements_dict(case),
-        "reactions": case_reactions_dict(case),
+        "displacements": case_displacements_dict(case, node_labels),
+        "reactions": case_reactions_dict(case, node_labels),
         "summary": case_summary_dict(case),
     }
