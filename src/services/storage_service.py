@@ -2,8 +2,10 @@
 Firebase Storage — .s2k ve diğer dosyaların saklanması.
 Firestore'daki 1MB doküman limiti nedeniyle dosya içerikleri burada tutulur.
 """
+import gzip
+import json
 import logging
-from io import BytesIO
+from typing import Any
 
 from services.firebase_service import firebase_service
 
@@ -48,6 +50,26 @@ class StorageService:
         blob = bucket.blob(storage_path)
         blob.delete()
         logger.info(f"Dosya silindi: {storage_path}")
+
+    # ----------------------------------------- JSON (gzip) yardımcıları
+    async def upload_json_gzip(self, path: str, data: Any) -> str:
+        """``data``'yı JSON olarak encode et, gzip sıkıştır, Storage'a koy.
+
+        Büyük analiz sonuçları (>1MB Firestore limiti aşanlar) için.
+        Döndüğü path `storage_paths` field'ında Firestore'a yazılır.
+        """
+        bucket = firebase_service.bucket
+        blob = bucket.blob(path)
+        payload = gzip.compress(json.dumps(data).encode("utf-8"))
+        blob.upload_from_string(payload, content_type="application/gzip")
+        logger.info(f"JSON gzip yüklendi: {path} ({len(payload)} bytes)")
+        return path
+
+    async def download_json_gzip(self, path: str) -> Any:
+        bucket = firebase_service.bucket
+        blob = bucket.blob(path)
+        payload = blob.download_as_bytes()
+        return json.loads(gzip.decompress(payload).decode("utf-8"))
 
 
 storage_service = StorageService()
