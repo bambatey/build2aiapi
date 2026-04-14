@@ -49,14 +49,16 @@ def client(monkeypatch) -> TestClient:
     store: dict[str, dict] = {}
 
     async def fake_create(uid, project_id, file_id, options, summary, cases,
-                          warnings, duration_ms, status="completed", error=None):
+                          warnings, duration_ms, modes=None,
+                          status="completed", error=None):
         import uuid
         aid = f"an_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow()
         record = {
             "analysis_id": aid, "project_id": project_id, "file_id": file_id,
             "status": status, "options": options, "summary": summary,
-            "cases": cases, "warnings": warnings, "error": error,
+            "cases": cases, "modes": modes or [],
+            "warnings": warnings, "error": error,
             "created_at": now,
             "completed_at": now if status == "completed" else None,
             "duration_ms": duration_ms,
@@ -161,10 +163,11 @@ def test_get_reactions_all_cases(client):
     )
     assert r.status_code == 200
     reacts = r.json()["data"]
-    # 20 mesnet × 4 yük durumu = 80
-    assert len(reacts) == 80
-    # G yük durumunda düşey reaksiyon toplamı pozitif (yapının ağırlığı)
+    # Fixture: 4 base case + 5 kombinasyon = 9 case; 20 mesnet × 9 = 180
+    assert len(reacts) == 180
+    # G base case (self-weight + gravity) → düşey reaksiyon toplamı pozitif
     g_fz = [r["fz"] for r in reacts if r["load_case"] == "G"]
+    assert len(g_fz) == 20
     assert sum(g_fz) > 0
 
 

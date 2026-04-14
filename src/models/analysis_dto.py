@@ -26,6 +26,11 @@ class AnalysisOptionsDto(BaseModel):
     solver: Literal["direct", "iterative"] = "direct"
     output_detail: Literal["summary", "full"] = "full"
 
+    # Seçim filtreleri — None = hepsi, boş liste = hiç.
+    # İstek: SAP'taki "run checked load cases" mantığı.
+    selected_load_cases: list[str] | None = None
+    selected_combinations: list[str] | None = None
+
 
 class AnalyzeRequestDto(BaseModel):
     """POST /api/projects/{pid}/files/{fid}/analyze body."""
@@ -97,3 +102,41 @@ class AnalysisListItemDto(BaseModel):
     created_at: datetime
     duration_ms: int | None = None
     summary: ModelSummaryDto | None = None
+
+
+# ------------------------------------------------------------------ preview
+class LoadCasePreviewDto(BaseModel):
+    """GET /preview — Dosyadaki yük durumlarını özetler (analiz öncesi seçim)."""
+
+    id: str
+    type: str                           # "dead", "live", "earthquake_x", ...
+    self_weight_factor: float
+    n_point_loads: int
+    n_distributed_loads: int
+
+
+class CombinationPreviewDto(BaseModel):
+    id: str
+    factors: dict[str, float]           # {case_id: scale_factor}
+
+
+class ModelPreviewDto(BaseModel):
+    """Analiz başlatmadan önce kullanıcıya seçenekleri göstermek için."""
+
+    n_nodes: int
+    n_frame_elements: int
+    n_shell_elements: int
+    load_cases: list[LoadCasePreviewDto]
+    combinations: list[CombinationPreviewDto]
+    warnings: list[str] = Field(default_factory=list)
+
+
+# -------------------------------------------------------------------- modes
+class ModeDto(BaseModel):
+    """Modal analiz — tek bir mod."""
+
+    mode_no: int
+    period: float                       # saniye
+    frequency: float                    # Hz
+    angular_frequency: float            # rad/s
+    mass_participation: dict[str, float] = Field(default_factory=dict)

@@ -30,6 +30,21 @@ def analysis_to_persistable(result: AnalysisResult) -> dict[str, Any]:
             for case_id, case in result.cases.items()
             if case_id != "_empty"
         },
+        "modes": [_mode_to_persistable(m) for m in result.modes],
+    }
+
+
+def _mode_to_persistable(mode) -> dict[str, Any]:
+    return {
+        "mode_no": mode.mode_no,
+        "period": _safe(mode.period),
+        "frequency": _safe(mode.frequency),
+        "angular_frequency": _safe(mode.angular_frequency),
+        # Mod şekli tablosu (her düğüm için) — UI görselleştirmesi için
+        "shape": [
+            {"node_id": nid, **{k: _safe(v) for k, v in disp.items()}}
+            for nid, disp in sorted(mode.shape.items())
+        ],
     }
 
 
@@ -103,6 +118,7 @@ def _safe(v: float) -> float:
 def _case_to_persistable(case: CaseResult) -> dict[str, Any]:
     return {
         "case_id": case.case_id,
+        "kind": getattr(case, "kind", "case"),
         "displacements": case_displacements_dict(case),
         "reactions": case_reactions_dict(case),
         "summary": case_summary_dict(case),

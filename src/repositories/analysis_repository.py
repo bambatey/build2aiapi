@@ -34,6 +34,7 @@ class AnalysisRepository:
         cases: dict[str, Any],
         warnings: list[str],
         duration_ms: int,
+        modes: list[dict[str, Any]] | None = None,
         status: str = "completed",
         error: str | None = None,
     ) -> dict[str, Any]:
@@ -46,7 +47,8 @@ class AnalysisRepository:
             "status": status,
             "options": options,
             "summary": summary,
-            "cases": cases,       # {case_id: {displacements, reactions, summary}}
+            "cases": cases,
+            "modes": modes or [],
             "warnings": warnings,
             "error": error,
             "created_at": now,

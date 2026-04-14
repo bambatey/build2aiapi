@@ -1,13 +1,15 @@
 """
-Yapısal Analiz Router — Statik Lineer MVP
+Yapısal Analiz Router — Statik Lineer MVP + Modal + Kombinasyonlar
 
+GET    /api/projects/{pid}/files/{fid}/preview                  → Model özeti + yük seçim seçenekleri
 POST   /api/projects/{pid}/files/{fid}/analyze                  → Analiz tetikle (senkron)
-GET    /api/projects/{pid}/files/{fid}/analyses                 → Bu dosyanın analiz geçmişi
-GET    /api/projects/{pid}/files/{fid}/analyses/{aid}           → Analiz status + özet
+GET    /api/projects/{pid}/files/{fid}/analyses                 → Dosyanın geçmişi
+GET    /api/projects/{pid}/files/{fid}/analyses/{aid}           → Status + özet
 GET    /api/projects/{pid}/files/{fid}/analyses/{aid}/displacements[?load_case=...]
 GET    /api/projects/{pid}/files/{fid}/analyses/{aid}/reactions[?load_case=...]
 GET    /api/projects/{pid}/files/{fid}/analyses/{aid}/summary
-DELETE /api/projects/{pid}/files/{fid}/analyses/{aid}           → Analiz sil
+GET    /api/projects/{pid}/files/{fid}/analyses/{aid}/modes     → Modal mod şekilleri
+DELETE /api/projects/{pid}/files/{fid}/analyses/{aid}
 """
 
 from __future__ import annotations
@@ -23,6 +25,10 @@ from models.analysis_dto import (
     AnalysisListItemDto,
     AnalysisStatusDto,
     AnalyzeRequestDto,
+    CombinationPreviewDto,
+    LoadCasePreviewDto,
+    ModeDto,
+    ModelPreviewDto,
     ModelSummaryDto,
     NodeDisplacementDto,
     ReactionDto,
@@ -31,8 +37,13 @@ from models.dto import BusinessLogicDto
 from repositories import analysis_repository, file_repository
 from services import storage_service
 from services.structural_analysis.exceptions import StructuralAnalysisError
-from services.structural_analysis.pipeline import run_from_s2k
+from services.structural_analysis.parser import parse_s2k
+from services.structural_analysis.pipeline import (
+    AnalysisOptions,
+    run_from_s2k,
+)
 from services.structural_analysis.results import analysis_to_persistable
+from services.structural_analysis.validation import validate_model
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +51,65 @@ router = APIRouter(
     prefix="/api/projects/{project_id}/files/{file_id}",
     tags=["analysis"],
 )
+
+
+# ---------------------------------------------------------------- PREVIEW
+@router.get(
+    "/preview",
+    response_model=BusinessLogicDto[ModelPreviewDto],
+)
+async def preview_model(
+    project_id: str,
+    file_id: str,
+    uid: str = Depends(get_uid),
+):
+    """Dosyayı parse et, yük durumları + kombinasyonları + özet döndür.
+
+    Frontend bu veriyle analiz-öncesi seçici modalını doldurur.
+    """
+    file_meta = await file_repository.get(uid, project_id, file_id)
+    if not file_meta:
+        raise HTTPException(status_code=404, detail="Dosya bulunamadı")
+    storage_path = file_meta.get("storage_path")
+    if not storage_path:
+        raise HTTPException(status_code=400, detail="Dosya içeriği mevcut değil")
+
+    text = await storage_service.download_file(storage_path)
+    try:
+        model = parse_s2k(text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Parse hatası: {exc}") from exc
+
+    # Kısa validator uyarıları
+    report = validate_model(model)
+    warnings_list = [f"[{i.code}] {i.message}" for i in report.issues]
+
+    cases = [
+        LoadCasePreviewDto(
+            id=c.id,
+            type=c.type.value,
+            self_weight_factor=c.self_weight_factor,
+            n_point_loads=len(c.point_loads),
+            n_distributed_loads=len(c.distributed_loads),
+        )
+        for c in model.load_cases.values()
+    ]
+    combos = [
+        CombinationPreviewDto(id=c.id, factors=c.factors)
+        for c in model.combinations
+    ]
+
+    return BusinessLogicDto(
+        success=True,
+        data=ModelPreviewDto(
+            n_nodes=len(model.nodes),
+            n_frame_elements=len(model.frame_elements),
+            n_shell_elements=len(model.shell_elements),
+            load_cases=cases,
+            combinations=combos,
+            warnings=warnings_list[:50],
+        ),
+    )
 
 
 # --------------------------------------------------------------------- POST
@@ -64,9 +134,17 @@ async def trigger_analysis(
 
     s2k_text = await storage_service.download_file(storage_path)
 
+    # API options → iç dataclass
+    pipeline_options = AnalysisOptions(
+        selected_load_cases=request.options.selected_load_cases,
+        selected_combinations=request.options.selected_combinations,
+        run_modal=request.options.modal,
+        modal_n_modes=request.options.modal_n_modes,
+    )
+
     started = time.perf_counter()
     try:
-        result = run_from_s2k(s2k_text)
+        result = run_from_s2k(s2k_text, pipeline_options)
     except StructuralAnalysisError as exc:
         logger.exception("Analiz başarısız (project=%s file=%s)", project_id, file_id)
         # Hata kaydını da Firestore'a yaz ki frontend görebilsin
@@ -74,7 +152,7 @@ async def trigger_analysis(
         created = await analysis_repository.create(
             uid=uid, project_id=project_id, file_id=file_id,
             options=request.options.model_dump(),
-            summary={}, cases={}, warnings=[],
+            summary={}, cases={}, modes=[], warnings=[],
             duration_ms=duration_ms, status="failed", error=str(exc),
         )
         return BusinessLogicDto(
@@ -93,6 +171,7 @@ async def trigger_analysis(
         options=request.options.model_dump(),
         summary=persistable["summary"],
         cases=persistable["cases"],
+        modes=persistable["modes"],
         warnings=result.warnings,
         duration_ms=duration_ms,
         status="completed",
@@ -178,6 +257,33 @@ async def get_displacements(
         for d in case_data.get("displacements", []):
             out.append(NodeDisplacementDto(**d))
     return BusinessLogicDto(success=True, data=out)
+
+
+# ---------------------------------------------------------- GET modes
+@router.get(
+    "/analyses/{analysis_id}/modes",
+    response_model=BusinessLogicDto[list[ModeDto]],
+)
+async def get_modes(
+    project_id: str,
+    file_id: str,
+    analysis_id: str,
+    uid: str = Depends(get_uid),
+):
+    record = await _require(uid, project_id, file_id, analysis_id)
+    modes = record.get("modes") or []
+    return BusinessLogicDto(
+        success=True,
+        data=[
+            ModeDto(
+                mode_no=m["mode_no"],
+                period=m["period"],
+                frequency=m["frequency"],
+                angular_frequency=m["angular_frequency"],
+            )
+            for m in modes
+        ],
+    )
 
 
 # ------------------------------------------------------- GET reactions

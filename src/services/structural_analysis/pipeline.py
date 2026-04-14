@@ -2,21 +2,26 @@
 
 Kaba akış (METHOD.md §5):
 
-    parse → validate → dof_numbering → assemble(K) → assemble(F)
-    → solve(static) → recover(displacements, reactions) → AnalysisResult
+    parse → validate → dof_numbering → assemble(K, M?) → assemble(F)
+    → solve(static | modal) → combinations → recover → AnalysisResult
 
-Modal/spektrum/kombinasyonlar ileri fazlarda eklenecek.
+Desteklenenler:
+- Statik lineer çözüm (yük durumu bazında)
+- Yük durumu filtreleme (``options.selected_load_cases``)
+- Yük kombinasyonları — lineer süperpozisyon
+- Modal analiz (lumped mass + eigsh)
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Iterable, Optional
 
 import numpy as np
 
 from .assembly import assemble_load_vectors, assemble_stiffness, number_dofs
-from .model.dto import ModelDTO
+from .model.dto import CombinationDTO, ModelDTO
 from .parser import parse_s2k
 from .recovery import node_displacements, node_reactions
 from .solver import StaticSolution, solve_static
@@ -26,28 +31,57 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class AnalysisOptions:
+    """Pipeline çalıştırıcıya verilen seçenekler.
+
+    API DTO'su (``AnalysisOptionsDto``) bu dataclass'a ``from_api_options``
+    ile dönüştürülür; çekirdek FEM modülü FastAPI'den bağımsız kalır.
+    """
+
+    # None = hepsi, boş liste = hiçbiri
+    selected_load_cases: Optional[list[str]] = None
+    selected_combinations: Optional[list[str]] = None
+    run_modal: bool = False
+    modal_n_modes: int = 12
+
+
+@dataclass
 class CaseResult:
-    """Tek bir yük durumunun sonucu."""
+    """Tek bir yük durumu ya da kombinasyonun sonucu."""
 
     case_id: str
     displacements: dict[int, dict[str, float]]
     reactions: dict[int, dict[str, float]]
     raw: StaticSolution
+    kind: str = "case"     # "case" | "combination"
+
+
+@dataclass
+class ModeResult:
+    mode_no: int
+    period: float
+    frequency: float
+    angular_frequency: float
+    shape: dict[int, dict[str, float]]   # node_id → {ux, uy, uz, rx, ry, rz}
 
 
 @dataclass
 class AnalysisResult:
-    """Tüm yük durumları için toplu sonuç."""
-
     model: ModelDTO
     cases: dict[str, CaseResult] = field(default_factory=dict)
+    modes: list[ModeResult] = field(default_factory=list)
     summary: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
-def run_static_analysis(model: ModelDTO) -> AnalysisResult:
-    """Bir ``ModelDTO`` üzerinden tüm yük durumlarını statik çöz."""
-    # Çözüm öncesi sağlama — hangi eleman/düğüm problemli, net logla
+# --------------------------------------------------------------------- main
+def run_static_analysis(
+    model: ModelDTO, options: AnalysisOptions | None = None
+) -> AnalysisResult:
+    """Statik + (opsiyonel) kombinasyon + (opsiyonel) modal."""
+    options = options or AnalysisOptions()
+
+    # Çözüm öncesi sağlama
     report = validate_model(model)
     warnings_list: list[str] = []
     for issue in report.issues:
@@ -59,8 +93,8 @@ def run_static_analysis(model: ModelDTO) -> AnalysisResult:
         warnings_list.append(msg)
     if report.has_errors():
         logger.error(
-            "Model sağlama: %d hata tespit edildi — çözüm yine de denenecek "
-            "ama sonuçlar singular K yüzünden NaN içerebilir.",
+            "Model sağlama: %d hata — çözüm denenecek ama sonuçlar "
+            "singular K yüzünden NaN içerebilir.",
             len(report.errors),
         )
 
@@ -68,35 +102,142 @@ def run_static_analysis(model: ModelDTO) -> AnalysisResult:
     K = assemble_stiffness(model, dof_map)
     load_vectors = assemble_load_vectors(model, dof_map)
 
+    # Hangi yük durumlarını çözeceğiz?
+    selected_cases = _resolve_selection(
+        all_ids=[cid for cid in load_vectors if cid != "_empty"],
+        selection=options.selected_load_cases,
+    )
+    # Kombinasyonlar için referans edilen base case'ler her zaman çözülmeli
+    selected_combos = _resolve_selection(
+        all_ids=[c.id for c in model.combinations],
+        selection=options.selected_combinations,
+    )
+    referenced_by_combos = {
+        case_id
+        for c in model.combinations
+        if c.id in selected_combos
+        for case_id in c.factors
+    }
+    cases_to_solve = set(selected_cases) | referenced_by_combos
+
     result = AnalysisResult(model=model)
     max_disp = 0.0
-    for case_id, (PS, RHS, US) in load_vectors.items():
+
+    # --- Base yük durumları
+    for case_id in cases_to_solve:
+        PS, RHS, US = load_vectors[case_id]
         sol = solve_static(case_id, K, PS, RHS, US, dof_map)
         disp = node_displacements(sol.U, dof_map)
         reacts = node_reactions(sol.P, dof_map, model)
         result.cases[case_id] = CaseResult(
-            case_id=case_id, displacements=disp, reactions=reacts, raw=sol
+            case_id=case_id, displacements=disp, reactions=reacts,
+            raw=sol, kind="case",
         )
-        if sol.U.size:
-            finite = sol.U[np.isfinite(sol.U)]
-            case_max = float(np.max(np.abs(finite))) if finite.size else 0.0
-        else:
-            case_max = 0.0
-        max_disp = max(max_disp, case_max)
+        max_disp = max(max_disp, _finite_max_abs(sol.U))
 
+    # --- Kombinasyonlar: lineer süperpozisyon
+    for combo in model.combinations:
+        if combo.id not in selected_combos:
+            continue
+        combo_result = _combine(combo, result.cases, dof_map, model)
+        if combo_result is not None:
+            result.cases[combo.id] = combo_result
+            max_disp = max(max_disp, _finite_max_abs(combo_result.raw.U))
+
+    # --- Modal analiz (opsiyonel)
+    periods: list[float] = []
+    if options.run_modal:
+        from .assembly.mass_assembler import assemble_mass
+        from .solver.modal_solver import solve_modal
+
+        try:
+            M = assemble_mass(model, dof_map)
+            result.modes = solve_modal(
+                K, M, dof_map, options.modal_n_modes,
+            )
+            periods = [m.period for m in result.modes]
+        except Exception as exc:
+            logger.exception("Modal analiz başarısız: %s", exc)
+            warnings_list.append(f"[modal_failed] Modal analiz başarısız: {exc}")
+
+    # --- Özet
+    # Kullanıcıya yalnızca SEÇİLEN case/combo sayısını göster
+    n_case_selected = sum(
+        1 for cid in result.cases
+        if result.cases[cid].kind == "case" and cid in selected_cases
+    )
+    n_combo_selected = sum(
+        1 for cid in result.cases
+        if result.cases[cid].kind == "combination"
+    )
     result.summary = {
         "n_nodes": len(model.nodes),
         "n_frame_elements": len(model.frame_elements),
         "n_shell_elements": len(model.shell_elements),
         "n_dofs_free": dof_map.n_free,
         "n_dofs_total": dof_map.n_total,
-        "n_load_cases": len([c for c in result.cases if c != "_empty"]),
+        "n_load_cases": n_case_selected,
+        "n_combinations": n_combo_selected,
+        "n_modes": len(result.modes),
+        "fundamental_period": periods[0] if periods else 0.0,
         "max_displacement": max_disp,
     }
     result.warnings = warnings_list
     return result
 
 
-def run_from_s2k(text: str) -> AnalysisResult:
-    """Yardımcı: .s2k metninden ModelDTO parse et ve çöz."""
-    return run_static_analysis(parse_s2k(text))
+def run_from_s2k(text: str, options: AnalysisOptions | None = None) -> AnalysisResult:
+    return run_static_analysis(parse_s2k(text), options)
+
+
+# ------------------------------------------------------------------- helpers
+def _resolve_selection(
+    all_ids: Iterable[str], selection: list[str] | None
+) -> set[str]:
+    all_set = set(all_ids)
+    if selection is None:
+        return all_set
+    return {s for s in selection if s in all_set}
+
+
+def _finite_max_abs(u: np.ndarray) -> float:
+    if u.size == 0:
+        return 0.0
+    finite = u[np.isfinite(u)]
+    return float(np.max(np.abs(finite))) if finite.size else 0.0
+
+
+def _combine(
+    combo: CombinationDTO,
+    base_cases: dict[str, CaseResult],
+    dof_map,
+    model: ModelDTO,
+) -> CaseResult | None:
+    """Lineer süperpozisyon: U_combo = Σ factor × U_case."""
+    referenced = list(combo.factors.items())
+    if not referenced:
+        return None
+    # Eksik base case → uyar, yine de geri kalanla hesapla
+    valid = [(cid, f) for cid, f in referenced if cid in base_cases]
+    if not valid:
+        logger.warning(
+            "Kombinasyon %s: referans edilen yük durumları çözülmemiş, atlanıyor.",
+            combo.id,
+        )
+        return None
+
+    first_U = base_cases[valid[0][0]].raw.U
+    U_combo = np.zeros_like(first_U)
+    P_combo = np.zeros_like(first_U)
+    for cid, factor in valid:
+        sol = base_cases[cid].raw
+        U_combo = U_combo + factor * sol.U
+        P_combo = P_combo + factor * sol.P
+
+    raw = StaticSolution(case_id=combo.id, U=U_combo, P=P_combo)
+    disp = node_displacements(U_combo, dof_map)
+    reacts = node_reactions(P_combo, dof_map, model)
+    return CaseResult(
+        case_id=combo.id, displacements=disp, reactions=reacts,
+        raw=raw, kind="combination",
+    )
