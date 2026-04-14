@@ -432,6 +432,7 @@ class S2KParser:
             )
 
     def _parse_joint_loads(self, tables, model: ModelDTO) -> None:
+        # Manuel düğüm yükleri (JOINT LOADS - FORCE)
         for row in tables.get("JOINT LOADS - FORCE", []):
             pat = row.get("LoadPat")
             nid = to_int(row.get("Joint"))
@@ -445,6 +446,50 @@ class S2KParser:
                 _safe(row.get("M2")),
                 _safe(row.get("M3")),
             ]
+            model.load_cases[pat].point_loads.append(
+                PointLoadDTO(node_id=nid, values=values)
+            )
+
+        # Otomatik deprem yükleri (AUTO SEISMIC LOADS TO JOINTS)
+        # SAP eşdeğer deprem yükü hesaplayıp düğümlere dağıtıyor; biz
+        # bunları o pattern'in point_loads'u gibi ekliyoruz.
+        # Format: LoadPat=EXp Joint=N FX/FY/FZ/MX/MY/MZ
+        for row in tables.get("AUTO SEISMIC LOADS TO JOINTS", []):
+            pat = row.get("LoadPat")
+            nid = to_int(row.get("Joint"))
+            if pat not in model.load_cases or nid is None:
+                continue
+            values = [
+                _safe(row.get("FX")),
+                _safe(row.get("FY")),
+                _safe(row.get("FZ")),
+                _safe(row.get("MX")),
+                _safe(row.get("MY")),
+                _safe(row.get("MZ")),
+            ]
+            # En az bir bileşen sıfırdan farklı olmalı
+            if not any(v != 0.0 for v in values):
+                continue
+            model.load_cases[pat].point_loads.append(
+                PointLoadDTO(node_id=nid, values=values)
+            )
+
+        # Otomatik rüzgar yükleri (AUTO WIND LOADS TO JOINTS) — aynı yapı
+        for row in tables.get("AUTO WIND LOADS TO JOINTS", []):
+            pat = row.get("LoadPat")
+            nid = to_int(row.get("Joint"))
+            if pat not in model.load_cases or nid is None:
+                continue
+            values = [
+                _safe(row.get("FX")),
+                _safe(row.get("FY")),
+                _safe(row.get("FZ")),
+                _safe(row.get("MX")),
+                _safe(row.get("MY")),
+                _safe(row.get("MZ")),
+            ]
+            if not any(v != 0.0 for v in values):
+                continue
             model.load_cases[pat].point_loads.append(
                 PointLoadDTO(node_id=nid, values=values)
             )
@@ -476,35 +521,89 @@ class S2KParser:
     def _parse_combinations(self, tables, model: ModelDTO) -> None:
         """SAP COMBINATION DEFINITIONS → CombinationDTO.
 
-        Yalnızca ``CaseType="Linear Static"`` satırları kabul edilir; başka
-        bir kombinasyonu referans eden satırlar (``CaseType="Linear
-        Combination"``) ve modal/spektrum referansları atlanır — lineer
-        süperpozisyon yalnızca base load case'lerde anlam taşır.
+        Tüm CaseType'lar kabul edilir (Linear Static + NonLin Static +
+        Response Spectrum vb.). Referans edilen case ismi ya doğrudan bir
+        load pattern'dir ya da CASE - STATIC 1 - LOAD ASSIGNMENTS tablosunda
+        tanımlı bir türetilmiş case'dir. İkinci durumda recursive expansion
+        ile base pattern'lara indirgenir.
 
-        İç içe kombinasyon gerekirse ileride topolojik sıralama ile
-        çözülebilir; şu an güvenli bir subset tutuyoruz.
+        Not: Modal/Response Spectrum case'lerine referans veren kombinasyon
+        satırları atlanır (lineer süperpozisyon statik case'ler arasında
+        anlamlıdır; RS sonuçları kendi yük durumu olarak zaten ayrıdır).
         """
-        combos: dict[str, dict[str, float]] = {}
+        # 1) Her case'in (pattern → scale) haritasını çıkar
+        case_definitions: dict[str, dict[str, float]] = {}
+        for row in tables.get("CASE - STATIC 1 - LOAD ASSIGNMENTS", []):
+            case_name = row.get("Case")
+            load_type = (row.get("LoadType") or "").strip().lower()
+            load_name = row.get("LoadName")
+            sf = to_float(row.get("LoadSF"))
+            if not case_name or not load_name or not math.isfinite(sf):
+                continue
+            # Load type "Load pattern" veya "Load case" olabilir
+            if "pattern" in load_type or "case" in load_type:
+                case_definitions.setdefault(case_name, {})[load_name] = (
+                    case_definitions.get(case_name, {}).get(load_name, 0.0) + sf
+                )
+
+        # 2) Kombinasyonları topla (satır başına: ComboName + CaseName + SF)
+        raw_combos: dict[str, dict[str, float]] = {}
+        skipped_reasons: dict[str, str] = {}
         for row in tables.get("COMBINATION DEFINITIONS", []):
             name = row.get("ComboName")
             case = row.get("CaseName")
             if not name or not case:
                 continue
-            case_type = (row.get("CaseType") or "").strip()
-            # Sadece "Linear Static" referansları al. Diğerleri: "Linear
-            # Combination", "Response Spectrum", "Modal", vs.
-            if case_type and case_type.lower() != "linear static":
+            case_type = (row.get("CaseType") or "").strip().lower()
+            # Modal / spektrum / time history gibi tipleri atla — süperpozisyon
+            # anlamlı değil
+            if case_type in ("modal", "response spectrum", "time history",
+                             "response combo", "moving load"):
+                skipped_reasons.setdefault(name, f"tip={case_type}")
                 continue
             factor = to_float(row.get("ScaleFactor"))
             if not math.isfinite(factor):
                 continue
-            combos.setdefault(name, {})[case] = factor
-        # Hiç base case referansı kalmayan kombinasyonları at
-        model.combinations = [
-            CombinationDTO(id=name, factors=factors)
-            for name, factors in combos.items()
-            if factors
-        ]
+            raw_combos.setdefault(name, {})[case] = (
+                raw_combos.get(name, {}).get(case, 0.0) + factor
+            )
+
+        # 3) Her kombinasyonun factor dict'ini base pattern'lara expand et
+        base_patterns = set(model.load_cases.keys())
+
+        def resolve(
+            name: str, depth: int = 0, stack: tuple[str, ...] = (),
+        ) -> dict[str, float]:
+            if name in base_patterns:
+                return {name: 1.0}
+            if depth > 10 or name in stack:
+                return {}
+            expansion = case_definitions.get(name)
+            if expansion is None:
+                return {}    # unknown — drop silently
+            result: dict[str, float] = {}
+            for inner, inner_sf in expansion.items():
+                sub = resolve(inner, depth + 1, stack + (name,))
+                for bp, bsf in sub.items():
+                    result[bp] = result.get(bp, 0.0) + inner_sf * bsf
+            return result
+
+        combos_final: list[CombinationDTO] = []
+        for name, factors in raw_combos.items():
+            resolved: dict[str, float] = {}
+            unresolved: list[str] = []
+            for case_name, sf in factors.items():
+                expanded = resolve(case_name)
+                if not expanded:
+                    unresolved.append(case_name)
+                    continue
+                for bp, bsf in expanded.items():
+                    resolved[bp] = resolved.get(bp, 0.0) + sf * bsf
+            # Sıfıra eşit faktörleri temizle (birbirini götüren terimler)
+            resolved = {k: v for k, v in resolved.items() if abs(v) > 1e-12}
+            if resolved:
+                combos_final.append(CombinationDTO(id=name, factors=resolved))
+        model.combinations = combos_final
 
 
 def parse_s2k(text: str) -> ModelDTO:
