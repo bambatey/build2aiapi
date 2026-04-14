@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 
 from dependencies import get_uid
 from models.analysis_dto import (
@@ -43,7 +44,13 @@ from services.structural_analysis.pipeline import (
     SpectrumOptions,
     run_from_s2k,
 )
-from services.structural_analysis.results import analysis_to_persistable
+from services.structural_analysis.results import (
+    analysis_to_persistable,
+    analysis_to_xlsx,
+    displacements_to_xlsx,
+    modes_to_xlsx,
+    reactions_to_xlsx,
+)
 from services.structural_analysis.validation import validate_model
 
 logger = logging.getLogger(__name__)
@@ -290,6 +297,7 @@ async def get_modes(
                 period=m["period"],
                 frequency=m["frequency"],
                 angular_frequency=m["angular_frequency"],
+                mass_participation=m.get("mass_participation") or {},
             )
             for m in modes
         ],
@@ -316,6 +324,94 @@ async def get_reactions(
         for r in case_data.get("reactions", []):
             out.append(ReactionDto(**r))
     return BusinessLogicDto(success=True, data=out)
+
+
+# --------------------------------------------------------- EXCEL EXPORT
+@router.get("/analyses/{analysis_id}/export/xlsx")
+async def export_full_xlsx(
+    project_id: str,
+    file_id: str,
+    analysis_id: str,
+    uid: str = Depends(get_uid),
+):
+    """Tüm analiz sonucunu tek .xlsx dosyası olarak indir."""
+    record = await _require(uid, project_id, file_id, analysis_id)
+    data = analysis_to_xlsx(record)
+    filename = f"analysis_{analysis_id}.xlsx"
+    return _xlsx_response(data, filename)
+
+
+@router.get("/analyses/{analysis_id}/export/displacements.xlsx")
+async def export_displacements_xlsx(
+    project_id: str,
+    file_id: str,
+    analysis_id: str,
+    load_case: str | None = Query(None),
+    uid: str = Depends(get_uid),
+):
+    record = await _require(uid, project_id, file_id, analysis_id)
+    cases = record.get("cases") or {}
+    case_ids = [load_case] if load_case else list(cases.keys())
+    from services.structural_analysis.results.excel_writer import (
+        _write_displacements_sheet,
+        _workbook_bytes,
+    )
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    for cid in case_ids:
+        cd = cases.get(cid, {}).get("displacements", [])
+        _write_displacements_sheet(wb, cid, cd)
+    data = _workbook_bytes(wb)
+    suffix = load_case or "all"
+    return _xlsx_response(data, f"displacements_{suffix}.xlsx")
+
+
+@router.get("/analyses/{analysis_id}/export/reactions.xlsx")
+async def export_reactions_xlsx(
+    project_id: str,
+    file_id: str,
+    analysis_id: str,
+    load_case: str | None = Query(None),
+    uid: str = Depends(get_uid),
+):
+    record = await _require(uid, project_id, file_id, analysis_id)
+    cases = record.get("cases") or {}
+    case_ids = [load_case] if load_case else list(cases.keys())
+    from services.structural_analysis.results.excel_writer import (
+        _write_reactions_sheet,
+        _workbook_bytes,
+    )
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    for cid in case_ids:
+        rx = cases.get(cid, {}).get("reactions", [])
+        _write_reactions_sheet(wb, cid, rx)
+    data = _workbook_bytes(wb)
+    suffix = load_case or "all"
+    return _xlsx_response(data, f"reactions_{suffix}.xlsx")
+
+
+@router.get("/analyses/{analysis_id}/export/modes.xlsx")
+async def export_modes_xlsx(
+    project_id: str,
+    file_id: str,
+    analysis_id: str,
+    uid: str = Depends(get_uid),
+):
+    record = await _require(uid, project_id, file_id, analysis_id)
+    modes = record.get("modes") or []
+    data = modes_to_xlsx(modes)
+    return _xlsx_response(data, f"modes_{analysis_id}.xlsx")
+
+
+def _xlsx_response(data: bytes, filename: str) -> Response:
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # --------------------------------------------------------------- DELETE

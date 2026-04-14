@@ -146,10 +146,11 @@ class ModelPreviewDto(BaseModel):
 
 # -------------------------------------------------------------------- modes
 class ModeDto(BaseModel):
-    """Modal analiz — tek bir mod."""
+    """Modal analiz — tek bir mod. Kütle katılım oranları 0-1 arası."""
 
     mode_no: int
     period: float                       # saniye
     frequency: float                    # Hz
     angular_frequency: float            # rad/s
+    # Yön bazlı kütle katılım oranı: {"ux": 0.82, "uy": 0.03, "uz": 0.00}
     mass_participation: dict[str, float] = Field(default_factory=dict)

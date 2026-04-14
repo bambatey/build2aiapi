@@ -40,6 +40,9 @@ def _mode_to_persistable(mode) -> dict[str, Any]:
         "period": _safe(mode.period),
         "frequency": _safe(mode.frequency),
         "angular_frequency": _safe(mode.angular_frequency),
+        "mass_participation": {
+            k: _safe(v) for k, v in (mode.mass_participation or {}).items()
+        },
         # Mod şekli tablosu (her düğüm için) — UI görselleştirmesi için
         "shape": [
             {"node_id": nid, **{k: _safe(v) for k, v in disp.items()}}

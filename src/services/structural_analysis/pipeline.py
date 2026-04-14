@@ -79,6 +79,8 @@ class ModeResult:
     frequency: float
     angular_frequency: float
     shape: dict[int, dict[str, float]]   # node_id → {ux, uy, uz, rx, ry, rz}
+    # Kütle katılım oranı (0..1 arası): {"ux": 0.82, "uy": 0.03, "uz": 0.00}
+    mass_participation: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

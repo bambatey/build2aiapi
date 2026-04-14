@@ -66,6 +66,23 @@ def solve_modal(
 
     modes: list[ModeResult] = []
     M_full = dof_map.n_total
+
+    # Kütle katılım oranlarını hesapla: r vektörleri + toplam kütleler
+    r_x = np.zeros(M_full)
+    r_y = np.zeros(M_full)
+    r_z = np.zeros(M_full)
+    for code in dof_map.codes.values():
+        r_x[code[0]] = 1.0
+        r_y[code[1]] = 1.0
+        r_z[code[2]] = 1.0
+    # Reduced space'e indir (free DOF kısmı)
+    r_x_f = r_x[0:N]
+    r_y_f = r_y[0:N]
+    r_z_f = r_z[0:N]
+    M_total_x = float(r_x_f @ M11 @ r_x_f)
+    M_total_y = float(r_y_f @ M11 @ r_y_f)
+    M_total_z = float(r_z_f @ M11 @ r_z_f)
+
     for idx, lam in enumerate(eigvals):
         if lam <= 0 or not np.isfinite(lam):
             continue
@@ -73,11 +90,33 @@ def solve_modal(
         freq = omega / (2 * math.pi)
         period = 1.0 / freq if freq > 0 else float("inf")
 
-        phi_full = np.zeros(M_full)
-        phi_full[0:N] = eigvecs[:, idx]
-        peak = np.max(np.abs(phi_full))
+        # Ham mod şekli (ölçeklenmemiş) — katılım için gereklidir
+        phi_raw = np.zeros(M_full)
+        phi_raw[0:N] = eigvecs[:, idx]
+        phi_f = eigvecs[:, idx]
+
+        # Modal genel kütle m_n* = φ^T M φ (eigsh mass-normalized verir ama
+        # kalıcı olmak için yeniden hesapla)
+        m_gen = float(phi_f @ M11 @ phi_f)
+        participation: dict[str, float] = {}
+        if m_gen > 0:
+            for label, r_f, M_tot in [
+                ("ux", r_x_f, M_total_x),
+                ("uy", r_y_f, M_total_y),
+                ("uz", r_z_f, M_total_z),
+            ]:
+                if M_tot <= 0:
+                    participation[label] = 0.0
+                    continue
+                gamma = float(phi_f @ M11 @ r_f) / m_gen
+                m_eff = gamma * gamma * m_gen
+                participation[label] = m_eff / M_tot   # oran (0..1)
+
+        # UI için normalize edilmiş şekil (max|φ| = 1)
+        phi_disp = phi_raw.copy()
+        peak = np.max(np.abs(phi_disp))
         if peak > 0:
-            phi_full = phi_full / peak
+            phi_disp = phi_disp / peak
 
         modes.append(
             ModeResult(
@@ -85,7 +124,8 @@ def solve_modal(
                 period=period,
                 frequency=freq,
                 angular_frequency=omega,
-                shape=_shape_to_dict(phi_full, dof_map),
+                shape=_shape_to_dict(phi_disp, dof_map),
+                mass_participation=participation,
             )
         )
     return modes

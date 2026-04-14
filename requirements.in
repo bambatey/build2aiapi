@@ -25,3 +25,6 @@ scipy>=1.13
 
 # Test
 pytest>=8.0
+
+# Excel export
+openpyxl>=3.1
