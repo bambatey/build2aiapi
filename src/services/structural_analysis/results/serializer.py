@@ -3,13 +3,22 @@
 Tek-doküman stratejisi: küçük/orta modeller için tüm analiz sonucu tek
 Firestore dokümanında yaşar. Büyük modeller (>1MB) için ileride
 Storage'a gzip JSON olarak ayırma desteği eklenir.
+
+NaN / inf değerleri JSON'a yazılmadan önce 0.0'a sanitize edilir
+(aksi halde FastAPI JSON encoder 500 atar). NaN üretimi genelde
+singular K matrisi ya da eksik eleman verisi göstergesidir — uyarı
+loglanır.
 """
 
 from __future__ import annotations
 
+import logging
+import math
 from typing import Any
 
 from ..pipeline import AnalysisResult, CaseResult
+
+logger = logging.getLogger(__name__)
 
 
 def analysis_to_persistable(result: AnalysisResult) -> dict[str, Any]:
@@ -29,8 +38,9 @@ def case_summary_dict(case: CaseResult) -> dict[str, Any]:
     max_disp = 0.0
     for d in case.displacements.values():
         for v in d.values():
-            if abs(v) > max_disp:
-                max_disp = abs(v)
+            vv = _safe(v)
+            if abs(vv) > max_disp:
+                max_disp = abs(vv)
     return {
         "case_id": case.case_id,
         "max_abs_displacement": max_disp,
@@ -40,26 +50,54 @@ def case_summary_dict(case: CaseResult) -> dict[str, Any]:
 
 def case_displacements_dict(case: CaseResult) -> list[dict[str, Any]]:
     """Her düğüm için yer değiştirme kaydı — NodeDisplacementDTO uyumlu."""
-    return [
-        {
-            "node_id": nid,
-            "load_case": case.case_id,
-            **disp,
-        }
-        for nid, disp in sorted(case.displacements.items())
-    ]
+    out = []
+    nan_count = 0
+    for nid, disp in sorted(case.displacements.items()):
+        clean = {}
+        for k, v in disp.items():
+            cv, was_bad = _sanitize(v)
+            clean[k] = cv
+            if was_bad:
+                nan_count += 1
+        out.append({"node_id": nid, "load_case": case.case_id, **clean})
+    if nan_count:
+        logger.warning(
+            "Case %s: %d yer değiştirme değeri NaN/inf — 0.0'a düşürüldü "
+            "(model sağlaması gerekli)",
+            case.case_id, nan_count,
+        )
+    return out
 
 
 def case_reactions_dict(case: CaseResult) -> list[dict[str, Any]]:
     """Her mesnet için reaksiyon kaydı — ReactionDTO uyumlu."""
-    return [
-        {
-            "node_id": nid,
-            "load_case": case.case_id,
-            **react,
-        }
-        for nid, react in sorted(case.reactions.items())
-    ]
+    out = []
+    nan_count = 0
+    for nid, react in sorted(case.reactions.items()):
+        clean = {}
+        for k, v in react.items():
+            cv, was_bad = _sanitize(v)
+            clean[k] = cv
+            if was_bad:
+                nan_count += 1
+        out.append({"node_id": nid, "load_case": case.case_id, **clean})
+    if nan_count:
+        logger.warning(
+            "Case %s: %d reaksiyon değeri NaN/inf — 0.0'a düşürüldü",
+            case.case_id, nan_count,
+        )
+    return out
+
+
+def _sanitize(v: float) -> tuple[float, bool]:
+    """NaN/inf → 0.0. İkinci dönüş değeri temizlenme olup olmadığıdır."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return 0.0, True
+    return float(v), False
+
+
+def _safe(v: float) -> float:
+    return _sanitize(v)[0]
 
 
 def _case_to_persistable(case: CaseResult) -> dict[str, Any]:

@@ -93,7 +93,7 @@ async def trigger_analysis(
         options=request.options.model_dump(),
         summary=persistable["summary"],
         cases=persistable["cases"],
-        warnings=[],
+        warnings=result.warnings,
         duration_ms=duration_ms,
         status="completed",
     )

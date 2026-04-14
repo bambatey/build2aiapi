@@ -10,6 +10,7 @@ Modal/spektrum/kombinasyonlar ileri fazlarda eklenecek.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,6 +20,9 @@ from .model.dto import ModelDTO
 from .parser import parse_s2k
 from .recovery import node_displacements, node_reactions
 from .solver import StaticSolution, solve_static
+from .validation import validate_model
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,10 +42,28 @@ class AnalysisResult:
     model: ModelDTO
     cases: dict[str, CaseResult] = field(default_factory=dict)
     summary: dict[str, float] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
 
 def run_static_analysis(model: ModelDTO) -> AnalysisResult:
     """Bir ``ModelDTO`` üzerinden tüm yük durumlarını statik çöz."""
+    # Çözüm öncesi sağlama — hangi eleman/düğüm problemli, net logla
+    report = validate_model(model)
+    warnings_list: list[str] = []
+    for issue in report.issues:
+        msg = f"[{issue.code}] {issue.message}"
+        if issue.severity == "error":
+            logger.error(msg)
+        else:
+            logger.warning(msg)
+        warnings_list.append(msg)
+    if report.has_errors():
+        logger.error(
+            "Model sağlama: %d hata tespit edildi — çözüm yine de denenecek "
+            "ama sonuçlar singular K yüzünden NaN içerebilir.",
+            len(report.errors),
+        )
+
     dof_map = number_dofs(model)
     K = assemble_stiffness(model, dof_map)
     load_vectors = assemble_load_vectors(model, dof_map)
@@ -55,7 +77,11 @@ def run_static_analysis(model: ModelDTO) -> AnalysisResult:
         result.cases[case_id] = CaseResult(
             case_id=case_id, displacements=disp, reactions=reacts, raw=sol
         )
-        case_max = float(np.max(np.abs(sol.U))) if sol.U.size else 0.0
+        if sol.U.size:
+            finite = sol.U[np.isfinite(sol.U)]
+            case_max = float(np.max(np.abs(finite))) if finite.size else 0.0
+        else:
+            case_max = 0.0
         max_disp = max(max_disp, case_max)
 
     result.summary = {
@@ -67,6 +93,7 @@ def run_static_analysis(model: ModelDTO) -> AnalysisResult:
         "n_load_cases": len([c for c in result.cases if c != "_empty"]),
         "max_displacement": max_disp,
     }
+    result.warnings = warnings_list
     return result
 
 
