@@ -71,6 +71,7 @@ app.add_middleware(
 
 # ---! Routers
 from routers import (
+    analysis_router,
     auth_router,
     chat_router,
     documents_router,
@@ -81,6 +82,7 @@ from routers import (
 app.include_router(auth_router)
 app.include_router(projects_router)
 app.include_router(files_router)
+app.include_router(analysis_router)
 app.include_router(chat_router)
 app.include_router(documents_router)
 
