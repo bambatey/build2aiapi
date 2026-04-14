@@ -208,19 +208,27 @@ def _check_frame_elements(model: ModelDTO, report: ValidationReport) -> None:
 
 
 def _check_node_connectivity(model: ModelDTO, report: ValidationReport) -> None:
-    """Bir düğüm hiçbir elemana bağlı değilse ve tutulu da değilse,
-    o düğümün tüm DOF'ları rijitlikten uzak → K'da sıfır satır → singular."""
-    referenced: set[int] = set()
-    for el in model.frame_elements.values():
-        referenced.update(el.nodes)
-    for el in model.shell_elements.values():
-        referenced.update(el.nodes)
+    """Bağlantısız veya sadece-shell'e-bağlı düğümleri yakala.
 
+    Motorun şu anki sürümü shell elemanlarını K'ya KATMAZ. Dolayısıyla
+    sadece shell'e bağlı olan bir düğüm — frame ile desteklenmiyorsa —
+    efektif olarak bağlantısızdır, K matrisi singular olur.
+    """
+    frame_referenced: set[int] = set()
+    for el in model.frame_elements.values():
+        frame_referenced.update(el.nodes)
+
+    shell_referenced: set[int] = set()
+    for el in model.shell_elements.values():
+        shell_referenced.update(el.nodes)
+
+    shell_only_count = 0
     for nid, node in model.nodes.items():
-        if nid in referenced:
+        is_restrained = any(node.restraints)
+        if nid in frame_referenced or is_restrained:
             continue
-        if any(node.restraints):
-            # Tutulu ama bağlantısız — tuhaf ama singular yapmaz
+        if nid in shell_referenced:
+            shell_only_count += 1
             continue
         report.issues.append(
             ValidationIssue(
@@ -228,5 +236,17 @@ def _check_node_connectivity(model: ModelDTO, report: ValidationReport) -> None:
                 f"Düğüm {nid}: hiçbir elemana bağlı değil ve tutulu değil "
                 "— K matrisinde sıfır satır oluşur.",
                 node_id=nid,
+            )
+        )
+    if shell_only_count > 0:
+        report.issues.append(
+            ValidationIssue(
+                "error", "shell_only_nodes",
+                f"{shell_only_count} düğüm yalnızca kabuk (shell) elemanlarına bağlı. "
+                "Motorun şu anki sürümü shell rijitliğini hesaba katmıyor → bu "
+                "düğümler K matrisinde bağlantısız kalır, sistem singular olur. "
+                "Çözümler: (1) shell kapsamı sonraki iterasyon, "
+                "(2) ilgili shell düğümlerini frame ile bağlayın, "
+                "(3) shell'siz bir analiz modeli kullanın.",
             )
         )

@@ -1,0 +1,86 @@
+# build2aiapi — Docker Compose
+#
+# Kullanım:
+#   docker compose up -d           # arka planda başlat
+#   docker compose logs -f api     # log tail
+#   docker compose restart api     # yeniden başlat
+#   docker compose down            # durdur
+#   docker compose up -d --build   # değişiklik sonrası rebuild
+#
+# Gereksinimler: aynı dizinde `.env` ve Firebase service-account JSON.
+# Prod'da TLS için önüne Nginx/Caddy reverse proxy koy ya da
+# "traefik" profilini aç (aşağıda kapalı örnek var).
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: build2aiapi:latest
+    container_name: build2aiapi
+    restart: unless-stopped
+    ports:
+      - "8000:8000"          # host:container — prod'da 127.0.0.1:8000:8000 yap
+    env_file:
+      - .env
+    environment:
+      # Container içi zorunlu çalışma dizini (firebase JSON relatif path için)
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - TZ=Europe/Istanbul
+    volumes:
+      # Firebase credentials container'da sabit olsun, .env'de de bu yolu ver:
+      #   FIREBASE_CREDENTIALS_PATH=/app/secrets/firebase.json
+      # Yoksa Dockerfile'daki COPY build2ai-firebase-adminsdk-*.json kullanılır.
+      - ./build2ai-firebase-adminsdk-fbsvc-3d1630b69e.json:/app/build2ai-firebase-adminsdk-fbsvc-3d1630b69e.json:ro
+      # Yerel .env değişimi rebuild gerektirmesin (env_file zaten okur)
+      - ./.env:/app/.env:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/health\", timeout=2).status==200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Memory limit — yapısal analiz 2140 frame + modal için ~500MB yetiyor.
+    # Güvenli tarafta 2GB verelim.
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+
+# Örnek: Traefik reverse proxy (TLS + sub-domain).
+# Aktif etmek için `docker compose --profile proxy up -d`.
+#
+#   traefik:
+#     image: traefik:v3.0
+#     profiles: ["proxy"]
+#     command:
+#       - "--providers.docker=true"
+#       - "--providers.docker.exposedbydefault=false"
+#       - "--entrypoints.web.address=:80"
+#       - "--entrypoints.websecure.address=:443"
+#       - "--certificatesresolvers.le.acme.email=you@example.com"
+#       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+#       - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+#     ports:
+#       - "80:80"
+#       - "443:443"
+#     volumes:
+#       - /var/run/docker.sock:/var/run/docker.sock:ro
+#       - ./letsencrypt:/letsencrypt
+#
+# Sonra api servisine şu label'ları ekle:
+#   labels:
+#     - "traefik.enable=true"
+#     - "traefik.http.routers.api.rule=Host(`api.structapp.xyz`)"
+#     - "traefik.http.routers.api.entrypoints=websecure"
+#     - "traefik.http.routers.api.tls.certresolver=le"
+#     - "traefik.http.services.api.loadbalancer.server.port=8000"

@@ -12,8 +12,8 @@ import logging
 import numpy as np
 import scipy.sparse as sp
 
-from ..elements import FrameElement3D
-from ..model.dto import FrameSectionDTO, ModelDTO
+from ..elements import FrameElement3D, build_shell
+from ..model.dto import FrameSectionDTO, ModelDTO, ShellSectionDTO
 from .dof_numbering import DofMap
 
 logger = logging.getLogger(__name__)
@@ -55,10 +55,45 @@ def assemble_stiffness(model: ModelDTO, dof_map: DofMap) -> sp.csc_matrix:
         cols += code * 12
         data += K_e.flatten().tolist()
 
-    if model.shell_elements:
+    # Shell elemanları — membran + plate bending birleşik
+    shell_count = 0
+    skipped_shells = 0
+    for el_dto in model.shell_elements.values():
+        if len(el_dto.nodes) != 4:
+            # Q9 / T3 / T6 şu an desteklenmiyor
+            skipped_shells += 1
+            continue
+        section = model.sections.get(el_dto.section_id)
+        material = model.materials.get(el_dto.material_id)
+        if not isinstance(section, ShellSectionDTO) or material is None:
+            skipped_shells += 1
+            continue
+        if any(n not in model.nodes for n in el_dto.nodes):
+            skipped_shells += 1
+            continue
+        shell_nodes = [model.nodes[n] for n in el_dto.nodes]
+        try:
+            shell = build_shell(shell_nodes, section, material)
+            K_sh = shell.global_stiffness()   # 24×24
+        except Exception as exc:
+            logger.warning("Shell %s build başarısız: %s", el_dto.id, exc)
+            skipped_shells += 1
+            continue
+        # Scatter: shell her düğümde 6 DOF
+        code: list[int] = []
+        for nid in el_dto.nodes:
+            code.extend(dof_map.codes[nid])
+        rows += np.repeat(code, 24).tolist()
+        cols += code * 24
+        data += K_sh.flatten().tolist()
+        shell_count += 1
+
+    if shell_count:
+        logger.info("Shell katkısı: %d eleman K'ya eklendi.", shell_count)
+    if skipped_shells:
         logger.warning(
-            "%d shell elemanı şu anki motor sürümünde desteklenmiyor, K'ya katkıları atlandı.",
-            len(model.shell_elements),
+            "%d shell elemanı atlandı (Q4 olmayan veya eksik veri).",
+            skipped_shells,
         )
 
     M = dof_map.n_total

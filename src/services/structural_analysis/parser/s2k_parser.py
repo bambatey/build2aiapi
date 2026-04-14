@@ -1,22 +1,15 @@
 """SAP2000 .s2k parser.
 
 MVP kapsam:
-    - Birim sistemi (PROGRAM CONTROL → CurrUnits)
-    - Malzemeler (MATERIAL PROPERTIES 01 + 02 birleşik)
-    - Çerçeve kesitleri (FRAME SECTION PROPERTIES 01 - GENERAL)
-    - Kabuk kesitleri (AREA SECTION PROPERTIES)
-    - Düğümler (JOINT COORDINATES)
-    - Mesnetler (JOINT RESTRAINT ASSIGNMENTS)
-    - Çerçeve elemanları (CONNECTIVITY - FRAME) + kesit atamaları
-    - Kabuk elemanları (CONNECTIVITY - AREA) + kesit atamaları
-    - Yük desenleri (LOAD PATTERN DEFINITIONS)
-    - Düğüm yükleri (JOINT LOADS - FORCE)
-    - Yayılı çerçeve yükleri (FRAME LOADS - DISTRIBUTED)
-    - Yük kombinasyonları (COMBINATION DEFINITIONS)
+    - Birim sistemi, malzemeler, kesitler, düğümler, mesnetler
+    - Çerçeve/kabuk elemanları + kesit atamaları
+    - Yük desenleri, düğüm yükleri, yayılı frame yükleri, kombinasyonlar
+    - Frame releases (mafsallar) — FRAME RELEASE ASSIGNMENTS 1
+    - Rijit diyafram — CONSTRAINT DEFINITIONS - DIAPHRAGM + JOINT CONSTRAINT
+    - Area → frame yük aktarımı — AREA LOADS - UNIFORM TO FRAME
 
-Henüz ele alınmayanlar (ileride): AREA LOADS - UNIFORM TO FRAME, JOINT
-CONSTRAINT ASSIGNMENTS (diyafram), response spectrum fonksiyonları, modal
-durum tanımları. Parser bu tabloları görür ama model'e yansıtmaz.
+Henüz eklenmemiş: response spectrum fonksiyonları, time history, nonlineer
+case tanımları — motor tarafından da kullanılmayan tablolar.
 """
 
 from __future__ import annotations
@@ -26,11 +19,15 @@ import re
 
 from ..exceptions import ParseError
 from ..model.dto import (
+    AreaUniformLoadDTO,
     CombinationDTO,
+    DiaphragmDTO,
     DistributedLoadDTO,
     FrameElementDTO,
     FrameSectionDTO,
     LoadCaseDTO,
+    MassSourceDTO,
+    MassSourcePatternDTO,
     MaterialDTO,
     ModelDTO,
     NodeDTO,
@@ -90,13 +87,154 @@ class S2KParser:
         self._parse_restraints(tables, model)
         self._parse_frame_elements(tables, model)
         self._parse_frame_assignments(tables, model)
+        self._parse_frame_releases(tables, model)
         self._parse_shell_elements(tables, model)
         self._parse_shell_assignments(tables, model)
+        self._parse_diaphragms(tables, model)
         self._parse_load_patterns(tables, model)
         self._parse_joint_loads(tables, model)
         self._parse_distributed_loads(tables, model)
+        self._parse_area_uniform_loads(tables, model)
         self._parse_combinations(tables, model)
+        self._parse_mass_source(tables, model)
         return model
+
+    # ----------------------------------------------------- MASS SOURCE
+    def _parse_mass_source(self, tables, model: ModelDTO) -> None:
+        """SAP MASS SOURCE tablosu — kütle kaynağı.
+
+        Format (tipik TBDY):
+            MassSource=MS1  Elements=No  Masses=No  Loads=Yes  IsDefault=Yes
+                            LoadPat=G  Multiplier=1
+            MassSource=MS1                          LoadPat=Q  Multiplier=0.3
+
+        İlk satırda flag'ler, sonraki satırlarda load pattern eklemeleri.
+        """
+        rows = tables.get("MASS SOURCE", [])
+        if not rows:
+            return
+        # Birden fazla mass source olabilir — IsDefault olanı seç, yoksa ilk
+        by_name: dict[str, dict] = {}
+        for row in rows:
+            name = row.get("MassSource") or "default"
+            entry = by_name.setdefault(name, {
+                "from_elements": False,
+                "from_masses": False,
+                "from_loads": False,
+                "is_default": False,
+                "patterns": [],
+            })
+            # Flag alanları yalnızca ilk satırda bulunur
+            if "Elements" in row:
+                entry["from_elements"] = _yn(row.get("Elements"))
+            if "Masses" in row:
+                entry["from_masses"] = _yn(row.get("Masses"))
+            if "Loads" in row:
+                entry["from_loads"] = _yn(row.get("Loads"))
+            if "IsDefault" in row:
+                entry["is_default"] = _yn(row.get("IsDefault"))
+            load_pat = row.get("LoadPat")
+            mult = to_float(row.get("Multiplier"))
+            if load_pat and math.isfinite(mult):
+                entry["patterns"].append(
+                    MassSourcePatternDTO(load_pat=load_pat, multiplier=mult)
+                )
+
+        # Default olanı seç (yoksa ilk)
+        chosen_name: str | None = None
+        for name, ent in by_name.items():
+            if ent["is_default"]:
+                chosen_name = name
+                break
+        if chosen_name is None and by_name:
+            chosen_name = next(iter(by_name))
+        if chosen_name is None:
+            return
+        ent = by_name[chosen_name]
+        model.mass_source = MassSourceDTO(
+            name=chosen_name,
+            from_elements=ent["from_elements"],
+            from_masses=ent["from_masses"],
+            from_loads=ent["from_loads"],
+            is_default=ent["is_default"],
+            load_patterns=ent["patterns"],
+        )
+
+    # ---------------------------------------------------- frame releases
+    def _parse_frame_releases(self, tables, model: ModelDTO) -> None:
+        """SAP FRAME RELEASE ASSIGNMENTS 1 - GENERAL → element.hinges.
+
+        Alan adları: PI/V2I/V3I/TI/M2I/M3I ve ...J (uç J için). Değer "Yes"
+        ise o DOF mafsallı (serbest bırakılmış).
+        """
+        tags = [("PI", "p"), ("V2I", "v2"), ("V3I", "v3"),
+                ("TI", "t"), ("M2I", "m2"), ("M3I", "m3")]
+        tags_j = [("PJ", "p"), ("V2J", "v2"), ("V3J", "v3"),
+                  ("TJ", "t"), ("M2J", "m2"), ("M3J", "m3")]
+        for row in tables.get("FRAME RELEASE ASSIGNMENTS 1 - GENERAL", []):
+            fid = to_int(row.get("Frame"))
+            if fid is None or fid not in model.frame_elements:
+                continue
+            start = [tag for col, tag in tags
+                     if (row.get(col) or "").strip().lower() == "yes"]
+            end = [tag for col, tag in tags_j
+                   if (row.get(col) or "").strip().lower() == "yes"]
+            if start or end:
+                model.frame_elements[fid].hinges = {"start": start, "end": end}
+
+    # ----------------------------------------------------------- diyafram
+    def _parse_diaphragms(self, tables, model: ModelDTO) -> None:
+        """CONSTRAINT DEFINITIONS - DIAPHRAGM + JOINT CONSTRAINT ASSIGNMENTS."""
+        defs: dict[str, dict[str, str]] = {}
+        for row in tables.get("CONSTRAINT DEFINITIONS - DIAPHRAGM", []):
+            name = row.get("Name")
+            if name:
+                defs[name] = {"axis": (row.get("Axis") or "Z").upper()}
+
+        assignments: dict[str, list[int]] = {}
+        for row in tables.get("JOINT CONSTRAINT ASSIGNMENTS", []):
+            if (row.get("Type") or "").strip().lower() != "diaphragm":
+                continue
+            name = row.get("Constraint")
+            jid = to_int(row.get("Joint"))
+            if name and jid is not None and jid in model.nodes:
+                assignments.setdefault(name, []).append(jid)
+
+        out: list[DiaphragmDTO] = []
+        for name, joints in assignments.items():
+            axis = defs.get(name, {}).get("axis", "Z")
+            if axis not in ("X", "Y", "Z"):
+                axis = "Z"
+            out.append(DiaphragmDTO(name=name, axis=axis, joints=joints))
+        model.diaphragms = out
+
+    # ----------------------------------------------- area → frame loads
+    def _parse_area_uniform_loads(self, tables, model: ModelDTO) -> None:
+        """AREA LOADS - UNIFORM TO FRAME.
+
+        Her satır: döşeme üstünde belirli yoğunlukta yük (kN/m²). Biz
+        ``model.area_uniform_loads`` listesine ham kayıt olarak koyuyoruz;
+        gerçek frame'e dağıtım assembler aşamasında yapılır.
+        """
+        out: list[AreaUniformLoadDTO] = []
+        for row in tables.get("AREA LOADS - UNIFORM TO FRAME", []):
+            aid = to_int(row.get("Area"))
+            pat = row.get("LoadPat")
+            val = to_float(row.get("UnifLoad"))
+            if aid is None or not pat or not math.isfinite(val):
+                continue
+            direction = (row.get("Dir") or "Gravity").strip().lower()
+            dist_type = (row.get("DistType") or "Two way").strip().lower()
+            if dist_type not in ("one way", "two way"):
+                dist_type = "two way"
+            out.append(AreaUniformLoadDTO(
+                area_id=aid,
+                load_pat=pat,
+                direction=direction if direction in ("gravity", "x", "y", "z") else "gravity",
+                magnitude=val,
+                dist_type=dist_type,  # type: ignore[arg-type]
+            ))
+        model.area_uniform_loads = out
 
     # -------------------------------------------------------- units / materials
     def _parse_units(self, tables, model: ModelDTO) -> None:
@@ -336,18 +474,36 @@ class S2KParser:
             model.load_cases[pat].distributed_loads.append(load)
 
     def _parse_combinations(self, tables, model: ModelDTO) -> None:
+        """SAP COMBINATION DEFINITIONS → CombinationDTO.
+
+        Yalnızca ``CaseType="Linear Static"`` satırları kabul edilir; başka
+        bir kombinasyonu referans eden satırlar (``CaseType="Linear
+        Combination"``) ve modal/spektrum referansları atlanır — lineer
+        süperpozisyon yalnızca base load case'lerde anlam taşır.
+
+        İç içe kombinasyon gerekirse ileride topolojik sıralama ile
+        çözülebilir; şu an güvenli bir subset tutuyoruz.
+        """
         combos: dict[str, dict[str, float]] = {}
         for row in tables.get("COMBINATION DEFINITIONS", []):
             name = row.get("ComboName")
             case = row.get("CaseName")
             if not name or not case:
                 continue
+            case_type = (row.get("CaseType") or "").strip()
+            # Sadece "Linear Static" referansları al. Diğerleri: "Linear
+            # Combination", "Response Spectrum", "Modal", vs.
+            if case_type and case_type.lower() != "linear static":
+                continue
             factor = to_float(row.get("ScaleFactor"))
             if not math.isfinite(factor):
                 continue
             combos.setdefault(name, {})[case] = factor
+        # Hiç base case referansı kalmayan kombinasyonları at
         model.combinations = [
-            CombinationDTO(id=name, factors=factors) for name, factors in combos.items()
+            CombinationDTO(id=name, factors=factors)
+            for name, factors in combos.items()
+            if factors
         ]
 
 
@@ -357,6 +513,10 @@ def parse_s2k(text: str) -> ModelDTO:
 
 
 # --------------------------------------------------------------------- helpers
+def _yn(v: str | None) -> bool:
+    return bool(v) and v.strip().lower() in ("yes", "true", "1")
+
+
 def _first_table(tables, names: tuple[str, ...]) -> list[dict[str, str]]:
     for name in names:
         if name in tables:

@@ -198,6 +198,26 @@ def test_real_sap_fixture_gravity_reactions_balance():
         L = ((n2.x - n1.x) ** 2 + (n2.y - n1.y) ** 2 + (n2.z - n1.z) ** 2) ** 0.5
         total_applied_z -= mat.rho * GRAVITY * sec.A * L
 
+    # Area uniform yükleri (UnifLoad × area → kenar frame'lere)
+    import numpy as np
+    for aul in model.area_uniform_loads:
+        if aul.load_pat != "G":
+            continue
+        shell = model.shell_elements.get(aul.area_id)
+        if shell is None or len(shell.nodes) < 3:
+            continue
+        pts = np.asarray([
+            [model.nodes[nid].x, model.nodes[nid].y, model.nodes[nid].z]
+            for nid in shell.nodes
+        ])
+        total = np.zeros(3)
+        origin = pts[0]
+        for i in range(1, len(pts) - 1):
+            total += np.cross(pts[i] - origin, pts[i + 1] - origin)
+        area = 0.5 * float(np.linalg.norm(total))
+        sign = -1 if aul.direction == "gravity" else (1 if aul.direction == "z" else 0)
+        total_applied_z += sign * aul.magnitude * area
+
     total_reaction_z = sum(r["fz"] for r in g_case.reactions.values())
     # Reaksiyon = -uygulanan yük (denge); toleransı %0.5
     assert total_reaction_z == pytest.approx(-total_applied_z, rel=5e-3)

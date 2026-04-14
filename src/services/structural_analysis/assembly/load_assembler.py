@@ -40,6 +40,9 @@ def assemble_load_vectors(
     results: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     M = dof_map.n_total
 
+    # Area → çevre frame'lere dağıtılmış ek yük listesi (yük durumu bazında)
+    area_to_frame_loads = _distribute_area_uniform_to_frames(model)
+
     for case_id, case in model.load_cases.items():
         PS = np.zeros(M)
         RHS = np.zeros(M)
@@ -55,10 +58,12 @@ def assemble_load_vectors(
             for i, v in enumerate(values_local):
                 PS[code[i]] += v
 
-        # Elemanlara uygulanan yükler: yayılı + öz ağırlık
-        # Elemanı yeniden inşa edip birden çok yük katkısını toplu işleyelim.
+        # Elemanlara uygulanan yükler: yayılı + area-from-shell + öz ağırlık
         per_element_loads: dict[int, list[DistributedLoadDTO]] = {}
         for dl in case.distributed_loads:
+            per_element_loads.setdefault(dl.element_id, []).append(dl)
+        # Area uniform yükleri bu case için frame'lere eklenir
+        for dl in area_to_frame_loads.get(case_id, []):
             per_element_loads.setdefault(dl.element_id, []).append(dl)
 
         frame_ids_to_process = set(per_element_loads.keys())
@@ -179,6 +184,93 @@ def _distributed_to_local_q(
     else:
         q[3:6] = local_vec
     return q
+
+
+# -------------------------------- AREA → FRAME yük dağıtımı (MVP)
+def _distribute_area_uniform_to_frames(
+    model: ModelDTO,
+) -> dict[str, list[DistributedLoadDTO]]:
+    """SAP AREA LOADS - UNIFORM TO FRAME → ekvivalent frame distributed loads.
+
+    Basit model (MVP): alan üstündeki toplam yük, o alanın çevresindeki
+    kenar frame'lere eşit ``q = UnifLoad × area / perimeter`` (kN/m) olarak
+    dağıtılır. Toplam yük korunur; gerçekçi tributary dağılım
+    (trapezoidal/triangular) sonraki iterasyonda iyileştirilebilir.
+
+    Alan-kenar frame'i tespiti: alan düğümleri ardışık ikili (i, j) için,
+    eğer böyle bir frame varsa (JointI,JointJ ya da tersi), onu kenar say.
+    """
+    out: dict[str, list[DistributedLoadDTO]] = {}
+    if not model.area_uniform_loads:
+        return out
+
+    # Frame hızlı arama: (node_a, node_b) → frame_id (yön-bağımsız)
+    edge_to_frame: dict[frozenset[int], int] = {}
+    for fid, el in model.frame_elements.items():
+        if len(el.nodes) >= 2:
+            edge_to_frame[frozenset([el.nodes[0], el.nodes[1]])] = fid
+
+    for aul in model.area_uniform_loads:
+        shell = model.shell_elements.get(aul.area_id)
+        if shell is None or len(shell.nodes) < 3:
+            continue
+        # Alan hesabı (poligon, 3D noktalardan)
+        coords = np.asarray([
+            [model.nodes[nid].x, model.nodes[nid].y, model.nodes[nid].z]
+            for nid in shell.nodes
+        ])
+        area = _polygon_area_3d(coords)
+        if area <= 0:
+            continue
+        # Kenar frame'lerini bul
+        perimeter_frames: list[tuple[int, float]] = []
+        total_perim = 0.0
+        for i in range(len(shell.nodes)):
+            a = shell.nodes[i]
+            b = shell.nodes[(i + 1) % len(shell.nodes)]
+            frame_id = edge_to_frame.get(frozenset([a, b]))
+            if frame_id is None:
+                continue
+            pa = np.asarray([model.nodes[a].x, model.nodes[a].y, model.nodes[a].z])
+            pb = np.asarray([model.nodes[b].x, model.nodes[b].y, model.nodes[b].z])
+            L = float(np.linalg.norm(pb - pa))
+            perimeter_frames.append((frame_id, L))
+            total_perim += L
+        if total_perim <= 0 or not perimeter_frames:
+            continue
+        # q = toplam yük / perimetre — tüm kenar frame'lere aynı kN/m
+        total_load = aul.magnitude * area
+        q = total_load / total_perim
+        # aul.direction → DistributedLoadDTO direction
+        for frame_id, _L in perimeter_frames:
+            out.setdefault(aul.load_pat, []).append(
+                DistributedLoadDTO(
+                    element_id=frame_id,
+                    coord_sys="global",
+                    direction=aul.direction,   # type: ignore[arg-type]
+                    kind="force",
+                    magnitude_a=q,
+                    magnitude_b=q,
+                )
+            )
+    return out
+
+
+def _polygon_area_3d(pts: np.ndarray) -> float:
+    """3D poligonun alanı (kenarların cross product'larının toplamı/2).
+
+    Düzlemsel olmayan poligonlarda yaklaşık alan verir — bina döşemeleri
+    için yeterlidir.
+    """
+    if pts.shape[0] < 3:
+        return 0.0
+    total = np.zeros(3)
+    origin = pts[0]
+    for i in range(1, len(pts) - 1):
+        v1 = pts[i] - origin
+        v2 = pts[i + 1] - origin
+        total = total + np.cross(v1, v2)
+    return 0.5 * float(np.linalg.norm(total))
 
 
 def _self_weight_local_q(element: FrameElement3D, factor: float) -> np.ndarray:

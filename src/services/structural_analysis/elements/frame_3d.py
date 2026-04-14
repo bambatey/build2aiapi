@@ -136,10 +136,25 @@ class FrameElement3D:
             ]
         )
 
+    def local_stiffness_with_releases(self) -> np.ndarray:
+        """Mafsallar (hinges) varsa static condensation uygulanmış lokal K.
+
+        Released DOF'lar kondanse edilir; geri kalan retained DOF'ların
+        rijitliği korunur, released satır/kolonlar sıfırlanır. Böylece
+        global birleştirmede o DOF'a eleman katkısı olmaz.
+        """
+        K = self.local_stiffness()
+        if not self.element.hinges:
+            return K
+        released = _release_indices(self.element.hinges)
+        if not released:
+            return K
+        return _condense_released_dofs(K, released)
+
     def global_stiffness(self) -> np.ndarray:
-        """Global rijitlik: ``inv(T) @ K_local @ T``. Orijinal ``K`` ile özdeş."""
+        """Global rijitlik — releases varsa kondanse edilmiş halden dönüşür."""
         T = self.local_to_global_transform()
-        return np.linalg.inv(T) @ self.local_stiffness() @ T
+        return np.linalg.inv(T) @ self.local_stiffness_with_releases() @ T
 
     # ---------------------------------------------------- yayılı yük vektörü
     def local_load_vector(self, q: list[float] | np.ndarray) -> np.ndarray:
@@ -174,6 +189,58 @@ class FrameElement3D:
 
 
 # --------------------------------------------------------------------- helpers
+# SAP release tag → 12-DOF lokal K indeksi
+# Lokal K sırası: [u, v, w, θx, θy, θz] at I (0-5), sonra J (6-11)
+# SAP konvansiyonu: P=axial (u), V2=shear in 2-dir (v), V3=shear in 3-dir (w),
+#                   T=torsion (θx), M2=moment about 2 (θy), M3=moment about 3 (θz)
+_RELEASE_DOF_AT_I = {"p": 0, "v2": 1, "v3": 2, "t": 3, "m2": 4, "m3": 5}
+_RELEASE_DOF_AT_J = {k: v + 6 for k, v in _RELEASE_DOF_AT_I.items()}
+
+
+def _release_indices(hinges: dict[str, list[str]]) -> list[int]:
+    out: list[int] = []
+    for tag in hinges.get("start", []):
+        idx = _RELEASE_DOF_AT_I.get(tag.lower())
+        if idx is not None:
+            out.append(idx)
+    for tag in hinges.get("end", []):
+        idx = _RELEASE_DOF_AT_J.get(tag.lower())
+        if idx is not None:
+            out.append(idx)
+    return out
+
+
+def _condense_released_dofs(K: np.ndarray, released: list[int]) -> np.ndarray:
+    """Static condensation: released DOF'ları elimine et, K'yı 12×12 tut.
+
+        K_r = K_rr - K_rc @ inv(K_cc) @ K_cr    (retained subset)
+        Sonra released pozisyonlara 0 doldur.
+
+    Bu sayede global birleştirmede eleman, released DOF'lara katkı vermez
+    (SAP'taki "moment release" davranışı).
+    """
+    released = sorted(set(released))
+    all_idx = list(range(K.shape[0]))
+    retained = [i for i in all_idx if i not in released]
+
+    K_rr = K[np.ix_(retained, retained)]
+    K_rc = K[np.ix_(retained, released)]
+    K_cr = K[np.ix_(released, retained)]
+    K_cc = K[np.ix_(released, released)]
+
+    try:
+        reduced = K_rr - K_rc @ np.linalg.solve(K_cc, K_cr)
+    except np.linalg.LinAlgError:
+        # K_cc singular olabilir (çok fazla kondanse); pseudo-inverse ile dene
+        reduced = K_rr - K_rc @ np.linalg.pinv(K_cc) @ K_cr
+
+    K_new = np.zeros_like(K)
+    for i, ri in enumerate(retained):
+        for j, rj in enumerate(retained):
+            K_new[ri, rj] = reduced[i, j]
+    return K_new
+
+
 def _node_euler_transform(node: NodeDTO) -> np.ndarray:
     """Düğüm yerel eksen ZYX Euler dönüşümü. Orijinal
     ``getNodeLokalAxesTransformation`` ile özdeş.

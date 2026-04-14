@@ -20,7 +20,12 @@ from typing import Iterable, Optional
 
 import numpy as np
 
-from .assembly import assemble_load_vectors, assemble_stiffness, number_dofs
+from .assembly import (
+    assemble_load_vectors,
+    assemble_stiffness,
+    build_diaphragm_transform,
+    number_dofs,
+)
 from .model.dto import CombinationDTO, ModelDTO
 from .parser import parse_s2k
 from .recovery import node_displacements, node_reactions
@@ -112,10 +117,19 @@ def run_static_analysis(
     dof_map = number_dofs(model)
     K = assemble_stiffness(model, dof_map)
     load_vectors = assemble_load_vectors(model, dof_map)
+    diaphragm_transform = build_diaphragm_transform(model, dof_map)
+    if diaphragm_transform:
+        logger.info(
+            "Rijit diyafram: %d slave DOF elenecek (reduced N_free=%d, N_total=%d).",
+            diaphragm_transform.n_slaves_eliminated,
+            diaphragm_transform.n_free_reduced,
+            diaphragm_transform.n_total_reduced,
+        )
 
     # Hangi yük durumlarını çözeceğiz?
+    available_cases = {cid for cid in load_vectors if cid != "_empty"}
     selected_cases = _resolve_selection(
-        all_ids=[cid for cid in load_vectors if cid != "_empty"],
+        all_ids=available_cases,
         selection=options.selected_load_cases,
     )
     # Kombinasyonlar için referans edilen base case'ler her zaman çözülmeli
@@ -123,13 +137,26 @@ def run_static_analysis(
         all_ids=[c.id for c in model.combinations],
         selection=options.selected_combinations,
     )
-    referenced_by_combos = {
-        case_id
-        for c in model.combinations
-        if c.id in selected_combos
-        for case_id in c.factors
-    }
-    cases_to_solve = set(selected_cases) | referenced_by_combos
+    referenced_by_combos: set[str] = set()
+    unknown_refs: dict[str, list[str]] = {}   # combo_id → [missing base case ids]
+    for c in model.combinations:
+        if c.id not in selected_combos:
+            continue
+        for case_id in c.factors:
+            if case_id in available_cases:
+                referenced_by_combos.add(case_id)
+            else:
+                # Nested kombinasyon ya da tanımsız referans — pipeline'da çözülemez
+                unknown_refs.setdefault(c.id, []).append(case_id)
+    for combo_id, missing in unknown_refs.items():
+        msg = (
+            f"[combo_unknown_refs] Kombinasyon {combo_id!r}: {len(missing)} base case "
+            f"referansı bulunamadı (iç içe kombinasyon olabilir): {missing[:5]}"
+        )
+        logger.warning(msg)
+        warnings_list.append(msg)
+    # SADECE gerçekten var olan base case'leri çöz — combinasyon adları buraya düşmesin
+    cases_to_solve = (set(selected_cases) | referenced_by_combos) & available_cases
 
     result = AnalysisResult(model=model)
     max_disp = 0.0
@@ -137,7 +164,7 @@ def run_static_analysis(
     # --- Base yük durumları
     for case_id in cases_to_solve:
         PS, RHS, US = load_vectors[case_id]
-        sol = solve_static(case_id, K, PS, RHS, US, dof_map)
+        sol = solve_static(case_id, K, PS, RHS, US, dof_map, diaphragm_transform)
         disp = node_displacements(sol.U, dof_map)
         reacts = node_reactions(sol.P, dof_map, model)
         result.cases[case_id] = CaseResult(
@@ -164,7 +191,10 @@ def run_static_analysis(
         from .solver.modal_solver import solve_modal
 
         try:
-            M_matrix = assemble_mass(model, dof_map)
+            # MASS SOURCE yük bazlıysa, referans load pattern'lerin çözülmüş
+            # olmasına gerek yok — yalnızca F vektörleri lazım. load_vectors
+            # zaten tüm pattern'ler için oluşturuldu.
+            M_matrix = assemble_mass(model, dof_map, load_vectors=load_vectors)
             result.modes = solve_modal(
                 K, M_matrix, dof_map, options.modal_n_modes,
             )

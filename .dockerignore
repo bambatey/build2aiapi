@@ -1,6 +1,27 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 .git/
+.gitignore
+.vscode/
+.idea/
+.claude/
 .DS_Store
+Thumbs.db
+
 test_login.py
+*.log
+.coverage
+htmlcov/
+
+# Test fixtures'ın büyükleri image'a gerek yok
+src/services/structural_analysis/tests/fixtures/*.s2k
+src/services/structural_analysis/tests/benchmarks/*.json
+
+README.md

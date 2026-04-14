@@ -138,13 +138,58 @@ class CombinationDTO(BaseModel):
     factors: dict[str, float]         # {"DEAD": 1.4, "LIVE": 1.6}
 
 
-class ModelDTO(BaseModel):
-    """Parser/mutator çıktısı — analiz motorunun tek kanonik girdisi.
+class MassSourcePatternDTO(BaseModel):
+    """MASS SOURCE tablosunda bir load pattern satırı."""
 
-    Frame ve shell elemanları ayrı sözlüklerde tutulur — SAP2000 her iki
-    elemanı da birbirinden bağımsız id dizisinde numaralandırır (ör. aynı
-    dosyada Frame=14 ve Area=14 birlikte olabilir).
+    load_pat: str
+    multiplier: float = 1.0
+
+
+class MassSourceDTO(BaseModel):
+    """SAP MASS SOURCE — kütle kaynağı tanımı.
+
+    ``from_loads=True`` ise kütle, belirtilen load pattern'lerdeki düşey
+    yüklerin g'ye bölünmesiyle hesaplanır (TBDY tipik: G×1 + Q×0.3).
+    ``from_elements=True`` ise her eleman kendi malzeme yoğunluğundan
+    kütle katar. Her ikisi de kombine olabilir (toplam).
     """
+
+    name: str = "default"
+    from_elements: bool = True
+    from_masses: bool = True      # nodal manuel kütle atamaları
+    from_loads: bool = False
+    is_default: bool = False
+    load_patterns: list[MassSourcePatternDTO] = Field(default_factory=list)
+
+
+class DiaphragmDTO(BaseModel):
+    """Rijit diyafram kısıtı.
+
+    ``axis``: normal eksen (genelde "Z" — yatay kat diyaframı).
+    ``joints``: bu diyaframa dahil olan düğüm id'leri.
+    """
+
+    name: str
+    axis: Literal["X", "Y", "Z"] = "Z"
+    joints: list[int]
+
+
+class AreaUniformLoadDTO(BaseModel):
+    """AREA LOADS - UNIFORM TO FRAME — döşeme üstü yoğunluk yükü.
+
+    ``magnitude``: yoğunluk (kN/m² — SAP UnifLoad).
+    Assembler tarafında alana bağlı frame'lere kN/m olarak dağıtılır.
+    """
+
+    area_id: int
+    load_pat: str
+    direction: str = "gravity"          # gravity | x | y | z
+    magnitude: float
+    dist_type: Literal["one way", "two way"] = "two way"
+
+
+class ModelDTO(BaseModel):
+    """Parser/mutator çıktısı — analiz motorunun tek kanonik girdisi."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -156,3 +201,6 @@ class ModelDTO(BaseModel):
     sections: dict[str, SectionDTO] = Field(default_factory=dict)
     load_cases: dict[str, LoadCaseDTO] = Field(default_factory=dict)
     combinations: list[CombinationDTO] = Field(default_factory=list)
+    diaphragms: list[DiaphragmDTO] = Field(default_factory=list)
+    area_uniform_loads: list[AreaUniformLoadDTO] = Field(default_factory=list)
+    mass_source: MassSourceDTO | None = None
