@@ -18,3 +18,10 @@ python-multipart
 
 # AI / DSPy
 dspy
+
+# Structural analysis engine (services/structural_analysis)
+numpy>=1.26
+scipy>=1.13
+
+# Test
+pytest>=8.0
