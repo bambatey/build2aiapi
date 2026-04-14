@@ -40,6 +40,7 @@ from services.structural_analysis.exceptions import StructuralAnalysisError
 from services.structural_analysis.parser import parse_s2k
 from services.structural_analysis.pipeline import (
     AnalysisOptions,
+    SpectrumOptions,
     run_from_s2k,
 )
 from services.structural_analysis.results import analysis_to_persistable
@@ -135,11 +136,20 @@ async def trigger_analysis(
     s2k_text = await storage_service.download_file(storage_path)
 
     # API options → iç dataclass
+    sp_dto = request.options.spectrum_params
+    spectrum_opts = SpectrumOptions(
+        Ss=sp_dto.Ss, S1=sp_dto.S1, soil=sp_dto.soil,
+        R=sp_dto.R, I=sp_dto.I,
+        run_x=sp_dto.run_x, run_y=sp_dto.run_y,
+    ) if sp_dto is not None else None
+
     pipeline_options = AnalysisOptions(
         selected_load_cases=request.options.selected_load_cases,
         selected_combinations=request.options.selected_combinations,
         run_modal=request.options.modal,
         modal_n_modes=request.options.modal_n_modes,
+        run_response_spectrum=request.options.response_spectrum,
+        spectrum=spectrum_opts,
     )
 
     started = time.perf_counter()

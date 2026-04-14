@@ -12,6 +12,18 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class SpectrumParamsDto(BaseModel):
+    """Response spectrum parametreleri (TBDY 2018)."""
+
+    Ss: float = 1.0
+    S1: float = 0.3
+    soil: Literal["ZA", "ZB", "ZC", "ZD", "ZE"] = "ZC"
+    R: float = 4.0
+    I: float = 1.0
+    run_x: bool = True
+    run_y: bool = True
+
+
 class AnalysisOptionsDto(BaseModel):
     """POST /analyze body içinde gelen istek seçenekleri."""
 
@@ -20,6 +32,7 @@ class AnalysisOptionsDto(BaseModel):
     modal_n_modes: int = 12
     response_spectrum: bool = False
     spectrum_code: Literal["TBDY_2018", "EC8", "CUSTOM"] | None = None
+    spectrum_params: SpectrumParamsDto | None = None
     pdelta: bool = False
     auto_combinations: bool = True
     combination_code: Literal["TBDY_2018", "EC0", "ASCE7"] = "TBDY_2018"

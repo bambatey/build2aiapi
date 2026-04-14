@@ -31,18 +31,29 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AnalysisOptions:
-    """Pipeline çalıştırıcıya verilen seçenekler.
+class SpectrumOptions:
+    """Response spectrum parametreleri (TBDY 2018)."""
 
-    API DTO'su (``AnalysisOptionsDto``) bu dataclass'a ``from_api_options``
-    ile dönüştürülür; çekirdek FEM modülü FastAPI'den bağımsız kalır.
-    """
+    Ss: float = 1.0           # Kısa periyot harita ivmesi (g)
+    S1: float = 0.3           # 1-sn harita ivmesi (g)
+    soil: str = "ZC"          # ZA..ZE
+    R: float = 4.0            # Davranış katsayısı
+    I: float = 1.0            # Önem katsayısı
+    run_x: bool = True
+    run_y: bool = True
+
+
+@dataclass
+class AnalysisOptions:
+    """Pipeline çalıştırıcıya verilen seçenekler."""
 
     # None = hepsi, boş liste = hiçbiri
     selected_load_cases: Optional[list[str]] = None
     selected_combinations: Optional[list[str]] = None
     run_modal: bool = False
     modal_n_modes: int = 12
+    run_response_spectrum: bool = False
+    spectrum: SpectrumOptions | None = None
 
 
 @dataclass
@@ -144,24 +155,60 @@ def run_static_analysis(
             result.cases[combo.id] = combo_result
             max_disp = max(max_disp, _finite_max_abs(combo_result.raw.U))
 
-    # --- Modal analiz (opsiyonel)
+    # --- Modal analiz (opsiyonel ya da RS istendiyse zorunlu)
     periods: list[float] = []
-    if options.run_modal:
+    needs_modal = options.run_modal or options.run_response_spectrum
+    M_matrix = None
+    if needs_modal:
         from .assembly.mass_assembler import assemble_mass
         from .solver.modal_solver import solve_modal
 
         try:
-            M = assemble_mass(model, dof_map)
+            M_matrix = assemble_mass(model, dof_map)
             result.modes = solve_modal(
-                K, M, dof_map, options.modal_n_modes,
+                K, M_matrix, dof_map, options.modal_n_modes,
             )
             periods = [m.period for m in result.modes]
         except Exception as exc:
             logger.exception("Modal analiz başarısız: %s", exc)
             warnings_list.append(f"[modal_failed] Modal analiz başarısız: {exc}")
 
+    # --- Response spectrum (opsiyonel)
+    if options.run_response_spectrum and result.modes and M_matrix is not None:
+        from .solver.response_spectrum import solve_response_spectrum
+        from .solver.static_solver import StaticSolution
+        from .spectra.tbdy_2018 import TBDY2018Spectrum
+
+        spec_opts = options.spectrum or SpectrumOptions()
+        spectrum = TBDY2018Spectrum(
+            Ss=spec_opts.Ss, S1=spec_opts.S1, soil=spec_opts.soil,  # type: ignore[arg-type]
+            R=spec_opts.R, I=spec_opts.I,
+        )
+        directions: list[tuple[str, str]] = []
+        if spec_opts.run_x:
+            directions.append(("x", "EQX_RS"))
+        if spec_opts.run_y:
+            directions.append(("y", "EQY_RS"))
+        for dir_code, case_id in directions:
+            try:
+                rs = solve_response_spectrum(
+                    K, M_matrix, result.modes, dof_map, spectrum, dir_code,
+                )
+                # SRSS sonucundan reaksiyon = K·U (RHS yok)
+                P = K @ rs.U
+                raw = StaticSolution(case_id=case_id, U=rs.U, P=P)
+                disp = node_displacements(rs.U, dof_map)
+                reacts = node_reactions(P, dof_map, model)
+                result.cases[case_id] = CaseResult(
+                    case_id=case_id, displacements=disp, reactions=reacts,
+                    raw=raw, kind="response_spectrum",
+                )
+                max_disp = max(max_disp, _finite_max_abs(rs.U))
+            except Exception as exc:
+                logger.exception("RS başarısız (%s): %s", dir_code, exc)
+                warnings_list.append(f"[rs_failed_{dir_code}] {exc}")
+
     # --- Özet
-    # Kullanıcıya yalnızca SEÇİLEN case/combo sayısını göster
     n_case_selected = sum(
         1 for cid in result.cases
         if result.cases[cid].kind == "case" and cid in selected_cases
@@ -169,6 +216,9 @@ def run_static_analysis(
     n_combo_selected = sum(
         1 for cid in result.cases
         if result.cases[cid].kind == "combination"
+    )
+    n_rs = sum(
+        1 for c in result.cases.values() if c.kind == "response_spectrum"
     )
     result.summary = {
         "n_nodes": len(model.nodes),
@@ -178,6 +228,7 @@ def run_static_analysis(
         "n_dofs_total": dof_map.n_total,
         "n_load_cases": n_case_selected,
         "n_combinations": n_combo_selected,
+        "n_response_spectrum": n_rs,
         "n_modes": len(result.modes),
         "fundamental_period": periods[0] if periods else 0.0,
         "max_displacement": max_disp,
