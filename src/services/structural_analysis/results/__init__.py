@@ -7,6 +7,7 @@ from .excel_writer import (
 from .serializer import (
     analysis_to_persistable,
     case_displacements_dict,
+    case_element_forces_dict,
     case_reactions_dict,
     case_summary_dict,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "analysis_to_persistable",
     "analysis_to_xlsx",
     "case_displacements_dict",
+    "case_element_forces_dict",
     "case_reactions_dict",
     "case_summary_dict",
     "displacements_to_xlsx",

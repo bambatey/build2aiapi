@@ -27,6 +27,7 @@ from models.analysis_dto import (
     AnalysisStatusDto,
     AnalyzeRequestDto,
     CombinationPreviewDto,
+    ElementForcesDto,
     LoadCasePreviewDto,
     ModeDto,
     ModelPreviewDto,
@@ -302,6 +303,32 @@ async def get_modes(
             for m in modes
         ],
     )
+
+
+# ------------------------------------------------- GET element forces
+@router.get(
+    "/analyses/{analysis_id}/forces",
+    response_model=BusinessLogicDto[list[ElementForcesDto]],
+)
+async def get_element_forces(
+    project_id: str,
+    file_id: str,
+    analysis_id: str,
+    load_case: str | None = Query(None),
+    element_id: int | None = Query(None),
+    uid: str = Depends(get_uid),
+):
+    """Frame eleman kesit tesirleri (P, V2, V3, T, M2, M3)."""
+    record = await _require(uid, project_id, file_id, analysis_id)
+    out: list[ElementForcesDto] = []
+    for case_id, case_data in (record.get("cases") or {}).items():
+        if load_case and case_id != load_case:
+            continue
+        for ef in case_data.get("element_forces", []) or []:
+            if element_id is not None and ef.get("element_id") != element_id:
+                continue
+            out.append(ElementForcesDto(**ef))
+    return BusinessLogicDto(success=True, data=out)
 
 
 # ------------------------------------------------------- GET reactions

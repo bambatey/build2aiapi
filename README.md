@@ -342,28 +342,39 @@ cd build2aiapi && source venv/bin/activate && pytest
 ## 9. Bilinen Sınırlar ve Yol Haritası
 
 **Çalışıyor ve doğrulandı:**
-- Statik lineer + modal + TBDY response spectrum
+- Statik lineer + modal + TBDY 2018 response spectrum
 - Shell Q4 (membran + plate bending + drilling)
-- Rijit diyafram, frame releases, area-to-frame yük dağıtımı
-- MASS SOURCE (Loads-based)
-- Kombinasyonlar (Linear Static)
+- Rijit diyafram (axis=Z), frame releases (mafsallar), area-to-frame yük dağıtımı
+- MASS SOURCE (Loads=Yes — TBDY G+0.3Q formülü)
+- Kombinasyonlar — Linear Static + NonLin Static (transitif expand ile iç içe referanslar)
+- Otomatik deprem yükleri (AUTO SEISMIC LOADS TO JOINTS) — SAP'ın ±%5 eksantrisite türevleri
+- Otomatik rüzgar yükleri (AUTO WIND LOADS TO JOINTS)
+- Modal kütle katılım oranları (Mx, My, Mz + kümülatif + TBDY %95 kontrolü)
+- Grid Lines (aks/kot) — her düğüme en yakın grid etiketi
+- Excel export (tüm sonuç + yük durumu / reaksiyon / modlar ayrı sheet'ler)
+- Firebase Storage gzip offload — 1MB Firestore limiti aşan büyük modeller
 
 **Henüz yok (ileride):**
+- **Eleman kesit tesirleri (M, V, N boyunca)** — mühendisin açıklık/mesnet momentleri için şart, pipeline'da recovery eksik
+- Drift oranı (kat ötelenmesi) hesabı
+- Otomatik yük kombinasyonları (kullanıcı SAP'tan almak zorunda; TBDY kombolarını bizden üretmiyoruz)
 - P-Δ (geometrik nonlineer)
+- CQC modal birleştirme (şu an SRSS; yakın periyotlarda SRSS yanlış)
 - Time-history analizi
 - Plastik mafsal / pushover (openseespy köprüsü)
-- Shell Q9, T3, T6
-- Eğrisel kabuk (curved shell)
+- Shell Q9, T3, T6 / Eğrisel kabuk
 - Tasarım kontrolleri (TS500, TS498, AISC)
 - Trapezoidal yayılı yük (şu an `magnitude_a ≠ magnitude_b` atlanır)
-- Nested kombinasyon (başka kombinasyonu referans eden) — tespit edilir, atlanır
 - Mesnet çökmesi (`US`)
+- Async jobs + SSE progress (uzun analizlerde HTTP timeout riski)
+- PDF rapor şablonu
 
 **Doğruluk notları:**
-- Gerçek SAP modeline karşı T₁ eşleşmesi tipik olarak ±%3-5 aralığında. Kaynak farklar:
-  - Plate bending formülasyonu (Mindlin + reduced int. vs. SAP ShellThin)
+- Gerçek SAP modeline karşı T₁ eşleşmesi: **±%3-5** aralığında (MASS SOURCE parse edildikten sonra 0.84 s → 1.14 s'ye düzeldi; SAP 1.10 s — fark %3.6).
+- Kalan farkın kaynakları:
+  - Plate bending formülasyonu (Mindlin + selective reduced integration vs. SAP ShellThin)
   - Drilling stabilizasyon + Tikhonov regularization (küçük rijitlik eklemesi)
-  - MASS SOURCE tam uyuşumu (bu commit'le kapatıldı — ~%3'e düştü)
+  - Q4 shell (SAP'ta opsiyonel DKMQ veya higher-order seçilebiliyor)
 
 ---
 
@@ -400,78 +411,163 @@ Motor matematiği **İTÜ Makina Mühendisliği 'Sonlu Elemanlar Analizi' ders k
 
 TBDY 2018 spektrum formülleri, AFAD deprem yönetmeliği Madde 2.3 ve Tablo 2.1/2.2'ye dayanır.
 
+---
 
+## 12. Son Güncellemeler (Changelog)
 
+Bu bölüm motorun ve UI'nın evrimini kronolojik olarak tutar. En yeni
+güncellemeler üstte.
 
+### v0.9 — Real-model tam uyum + UI polish (2026-04-16)
 
+Gerçek SAP modellerinde (340+ düğüm, 216 shell, 90 kombinasyon) uçtan
+uca çalışma + mühendislik doğruluğu + büyük UX iyileştirmeleri.
 
+| Değişiklik | Açıklama |
+|---|---|
+| **Modal kütle katılım oranları** | `ModeDTO.mass_participation` (Mx/My/Mz). UI tablosunda kümülatif satır + TBDY %95 ✓/✗ + mod yönü rozeti (X/Y/Z/lokal) |
+| **Aks / Kot etiketleri** | `GRID LINES` tablosu parse, her düğüme 30 cm tolerans ile en yakın grid. UI'da tablo satırlarında **`B-3`** (kolon kesişimi — mavi monospace) veya **`aks B`** (ara düğüm — gri) + **`Z2`** kot rozeti. Hover tooltip ile açıklama |
+| **Yük durumu dropdown** | 115 pill'lik liste yerine **arama + gruplandırılmış dropdown**: kapalıyken seçili case trigger'da, açılınca mavi "Yük Patternleri" + mor "Kombinasyonlar" grupları |
+| **Kombinasyon detayı (ana ekran)** | Seçili combo için info butonuyla formül açılır: `+1.400·G  +1.600·Q  +1.600·Qr` |
+| **Config modal — scroll + arama** | 90+ kombinasyon için max-height scroll alanı + mini search box; her combo'nun yanında detay expander |
+| **Excel export** | `openpyxl` ile 4 endpoint: `/export/xlsx` (tüm analiz, her case + mod ayrı sheet), `displacements.xlsx`, `reactions.xlsx`, `modes.xlsx`. UI'da 4 buton + yükleniyor göstergesi |
+| **Auth race fix** | `authReady()` promise ile Firebase auth restore bekleme — refresh sonrası "geçmiş analiz boş" bug'ı çözüldü |
+| **Firebase Storage gzip offload** | 1MB Firestore limiti aşan payload'larda `cases` ve `modes` otomatik olarak gzip JSON olarak Storage'a yazılır; Firestore'da pointer kalır; okuma tarafı şeffaf |
+| **Docker compose + .dockerignore** | Tek-komut deploy (`docker compose up -d --build`). Health check, log rotation, 2GB RAM limit, opsiyonel Traefik profili |
 
+### v0.8 — Shell K + SAP MASS SOURCE (2026-04-15)
 
-YAPILACAKLAR:
+"İterasyon B" — gerçek SAP modelinin çözülebilmesi için eksik shell K ve
+kütle kaynağı eklemeleri.
 
-Şu anki durum — dürüst değerlendirme
-✅ Production-ready (bu case'ler için tamam)
-Use case	Durum	Örnek
-Düşük-orta RC bina statik analizi (G, Q)	Tam	3-10 kat betonarme konut
-Modal analiz (öz frekans + mod şekli)	Tam	T₁/T₂ hesabı, SAP ile %3-5 içinde
-TBDY response spectrum	Tam	EQX_RS, EQY_RS — SRSS kombinasyonu
-Yük kombinasyonları (Linear Static)	Tam	1.4G+1.6Q, G+Q+E vb.
-Rijit diyafram (axis=Z)	Tam	Kat döşemesi rigid kabulü
-Frame releases (mafsallar)	Tam	Pin-pin kirişler
-Döşeme yükleri (AREA → FRAME)	Tam	Kaplama, sıva ağırlığı
-⚠️ Eksik ama kritik (iş için gerekli)
-Özellik	Neden kritik	Tahmini efor
-Eleman kesit tesirleri (M, V, N boyunca)	Mühendis kiriş momenti olmadan tasarım yapamaz	1-2 gün
-Kütle katılım oranı raporu	TBDY %95 şartı — şu an dışardan hesaplıyoruz	yarım gün
-Drift oranı (kat ötelenmesi)	TBDY deprem şartları	1 gün
-Otomatik yük kombinasyonları	Kullanıcının elle girmesine gerek kalmasın	yarım gün
-CQC mod birleştirme	Yakın periyotlu modlarda SRSS yanlış	yarım gün
-Mesnet çökmesi (settlement)	Nadir ama gerektiğinde şart	yarım gün
-Trapezoidal yayılı yük	magnitude_a ≠ magnitude_b — şu an atlanıyor	yarım gün
-🟡 Eksik ama bazı case'ler için (hepsi gerekli değil)
-Özellik	Hangi case'ler için?	Tahmini efor
-P-Δ (geometrik nonlineer)	Yüksek katlı bina (>10 kat)	2-3 gün
-Burkulma analizi (Euler)	Çelik yapılar, narin kolonlar	2 gün
-Yay mesnet (Winkler, temel)	Radyasyon temelli yapılar	1 gün
-Cable/brace (sadece çekme)	Asma yapılar, çaprazlar	1 gün
-Nested kombinasyonlar	Karmaşık SAP modellerinde	yarım gün
-EQX/EQY pattern'i (otomatik)	TBDY eşdeğer deprem yükü	1 gün
-🔴 Eksik büyük modüller (ayrı sprint)
-Modül	Kapsam
-Tasarım kontrolleri (TS500 RC, TS498 çelik, AISC)	Kapasite-talep oranı, donatı önerisi — 1-2 hafta
-Nonlineer analiz (pushover, plastik mafsal)	openseespy köprüsü — 1-2 hafta
-Time-history analizi	İvme kaydıyla dinamik — 1 hafta
-3D solid elemanlar (brick, tetra)	Temel, dolgu duvarı — 1 hafta
-Curved shell (eğrisel kabuk)	Kubbe, silo, kemer
-Bridge moving loads	Köprü tasarımı
-🔵 Altyapı / UX
-Eksik	Etki
-Büyük modeller için Storage gzip split	Firestore 1MB limiti — 500+ düğüm modellerde problem
-Async jobs (RabbitMQ + SSE)	60 sn+ süren analizler HTTP timeout'a girer
-PDF rapor üretimi	Mühendis çıktı vermek ister
-Excel export	—
-Stress kontur haritası (shell yüzey)	—
-Deformed shape animation (3D viewer)	Çok faydalı, şu an yok
-Özet — "Hangi kullanıcı için hazırız?"
-Profil	Hazırlık durumu
-Üniversite öğrencisi / araştırmacı (temel statik+modal)	✅ %95
-Yapı mühendisi — ön tasarım (betonarme/çelik bina statik+modal+RS)	✅ %80
-Yapı mühendisi — detay tasarım (kesit tesirleri, drift, tasarım kontrolü ister)	⚠️ %50
-Yüksek yapı / özel proje (P-Δ, nonlineer, kapsamlı raporlama)	⚠️ %30
-Köprü / endüstriyel tesis (curved shell, moving load, cable)	❌ %15
-Benim önerim — Sıradaki 3 öncelik
-Geçerli hedefe bağlı olarak:
+| Değişiklik | Etki |
+|---|---|
+| **PlaneStressQ4** (membran) | 4-düğümlü Q4, SEA_Book `sec4_plane_stress_rectangle_gauss.py` port, altın test ile |
+| **PlateBendingQ4** (Mindlin-Reissner) | Bending 2×2 Gauss + shear 1×1 reduced integration (shear locking önlenir) |
+| **ShellQ4** (full shell) | 24×24 global K = membran 8 + plate 12 + drilling 4. 3D eksen dönüşümü düğüm konumlarından |
+| **Assembler entegrasyonu** | `stiffness_assembler` her Q4 shell'i K'ya ekler; shell kütlesi (ρ × A × t) lumped olarak düğümlere |
+| **MASS SOURCE tablosu** | Parser yeni: `Elements=No Loads=Yes` varyasyonu. Mass matrix `load_vectors` kullanarak G×1 + Q×0.3 = 1270 ton çıkardı (önce 683 ton). T₁ = 0.84 → **1.14 s** (SAP 1.10 s ile %3 fark) |
+| **Çelik/beton ρ fallback** | Malzeme UnitMass=0 ise `E`'den otomatik: çelik 7.85, beton 2.5 t/m³ |
 
-A) "Mühendise yararlı analiz aracı":
+### v0.7 — Nested kombinasyonlar + AUTO SEISMIC (2026-04-14)
 
-Kesit tesirleri (M, V, N diyagramları) — 1-2 gün
-Kütle katılım oranı + drift hesabı — 1 gün
-Otomatik kombinasyonlar (TBDY) — yarım gün
-Bunlar bittikten sonra frontend'de SAP benzeri "mühendise anlamlı" çıktı olur.
+Kullanıcının dosyasında 100 COMBINATION DEFINITIONS satırı ama çoğu
+"NonLin Static" → önceden sadece "Linear Static" alınıyordu (7 combo).
 
-B) "Production-grade platform":
+| Değişiklik | Etki |
+|---|---|
+| **`CASE - STATIC 1 - LOAD ASSIGNMENTS` parse** | Türetilmiş case'lerin pattern haritası (örn. `Q+Qr = Q×1 + Qr×1`) çıkarılır |
+| **Transitif combo expansion** | Recursive resolve — her combo base pattern'lara indirgenir (max 10 derinlik). 7 combo → **90 combo** |
+| **`AUTO SEISMIC LOADS TO JOINTS`** parse | SAP'ın ±%5 eksantrisite türevleri (Exp, Expep, Expen, vs.) — 4560 satır düğüm yükü pattern'lere aktarılır |
+| **`AUTO WIND LOADS TO JOINTS`** parse | Rüzgar yükü otomatik pattern'leri |
 
-Async jobs + SSE progress — 2 gün
-Storage gzip offload — 1 gün
-PDF rapor şablonu — 2 gün
-Hangisine odaklanalım?
+### v0.6 — Diyafram + frame releases + area loads (2026-04-13)
+
+Real SAP fixture'ı "NORMAL RİJİTLİK temiz.s2k" ilk kez çözülür hale geldi.
+
+| Değişiklik | Etki |
+|---|---|
+| **Rijit diyafram (master-slave)** | `CONSTRAINT DEFINITIONS - DIAPHRAGM` + `JOINT CONSTRAINT ASSIGNMENTS` parse, transformation matrix T ile reduced solve. 900 slave DOF elenir |
+| **Frame releases (mafsallar)** | `FRAME RELEASE ASSIGNMENTS 1` parse, statik kondenzasyon: `K_new = K_rr - K_rc × inv(K_cc) × K_cr` |
+| **AREA LOADS - UNIFORM TO FRAME** | Döşeme yoğunluk yükü × alan / perimetre → çevre frame'lere q kN/m |
+| **Tikhonov regularization** | Sıfır-rijitlikli DOF varsa küçük α ile stabilize — tam mafsal + shell'siz mekanizma artıkları için |
+
+### v0.5 — TBDY Response Spectrum (2026-04-12)
+
+TBDY 2018 Madde 2.3 elastik + tasarım spektrumu ve SRSS modal birleştirme.
+Zemin sınıfı ZA-ZE interpolasyonu dahil. EQX_RS / EQY_RS case'leri üretir.
+
+### v0.4 — Modal + Kombinasyon filtreleme + preview (2026-04-11)
+
+Kullanıcı analiz başlatmadan önce yük durumu + kombinasyonu seçer,
+modal analiz opsiyonel. `/preview` endpoint'i ile dosyadaki case'ler
+listelenir. AnalysisConfigModal.vue dropdown tabanlı UI.
+
+### v0.3 — FastAPI router + frontend (2026-04-10)
+
+Analiz başlatma (`POST /analyze`), geçmiş listeleme, sonuç endpoint'leri
+(displacements/reactions/modes) + Nuxt frontend entegrasyonu.
+Firestore'da analiz sonucu saklanır.
+
+### v0.2 — Statik solver + recovery MVP (2026-04-09)
+
+`parse → DOF numaralama → K/F assemble → spsolve → yer değiştirme + reaksiyon`.
+Partitioned çözüm (serbestler/tutulular), SEA_Book referans matematik.
+
+### v0.1 — FrameElement3D port (2026-04-08)
+
+SEA_Book `sec5_frame_3d.py` characterization ile port edildi. 10 altın
+test ile K_Local, K_Global, TLG, q_Local, B matrisleri birebir korunur.
+
+---
+
+## 13. Yol Haritası
+
+Hâlâ eksik olan özellikler, öncelik ve zorluk sınıfına göre.
+
+### ⚠️ Kritik (üretimde iş yapmak için şart)
+
+| Özellik | Neden kritik | Tahmini efor |
+|---|---|---|
+| **Eleman kesit tesirleri (M, V, N boyunca)** | Kirişin mesnet ve açıklık momentlerini görmeden tasarım yapılamaz | 1-2 gün |
+| **Drift oranı** (kat ötelenmesi) | TBDY deprem şartları | 1 gün |
+| **Otomatik yük kombinasyonları** | TBDY kombolarını bizim üretmemiz — kullanıcı SAP'a bağımlı kalmasın | yarım gün |
+| **CQC modal birleştirme** | Yakın periyotlu modlarda SRSS yanlış | yarım gün |
+| **Trapezoidal yayılı yük** | `magnitude_a ≠ magnitude_b` — şu an atlanıyor | yarım gün |
+| **Mesnet çökmesi** (settlement) | Nadir ama gerektiğinde şart | yarım gün |
+
+### 🟡 Bazı senaryolar için (hepsi gerekli değil)
+
+| Özellik | Hangi case'ler için? | Tahmini efor |
+|---|---|---|
+| **P-Δ** (geometrik nonlineer) | Yüksek katlı bina (>10 kat) | 2-3 gün |
+| **Burkulma analizi** (Euler) | Çelik yapılar, narin kolonlar | 2 gün |
+| **Yay mesnet** (Winkler, temel) | Radye temelli yapılar | 1 gün |
+| **Cable/brace** (sadece çekme) | Asma yapılar, çelik çaprazlar | 1 gün |
+
+### 🔴 Büyük modüller (ayrı sprint)
+
+| Modül | Kapsam |
+|---|---|
+| **Tasarım kontrolleri** (TS500 RC, TS498 çelik, AISC) | Kapasite/talep oranı, donatı önerisi — 1-2 hafta |
+| **Nonlineer analiz** (pushover, plastik mafsal) | `openseespy` köprüsü — 1-2 hafta |
+| **Time-history analizi** | İvme kaydıyla dinamik — 1 hafta |
+| **3D solid elemanlar** (brick, tetra) | Temel, dolgu duvarı — 1 hafta |
+| **Curved shell** (eğrisel kabuk) | Kubbe, silo, kemer |
+| **Bridge moving loads** | Köprü tasarımı |
+
+### 🔵 Altyapı / UX
+
+| Eksik | Etki |
+|---|---|
+| **Async jobs** (RabbitMQ + SSE) | 60 sn+ süren analizler HTTP timeout'a girer |
+| **PDF rapor üretimi** | Mühendis kağıt çıktı ister (TBDY format) |
+| **Stress kontur haritası** (shell yüzey) | Shell analizinde en değerli görsel |
+| **Deformed shape animation** (3D viewer) | Mod şekli + yer değiştirme animasyonu |
+
+---
+
+## 14. "Hangi kullanıcı için hazırız?"
+
+| Profil | Hazırlık durumu |
+|---|---|
+| **Üniversite öğrencisi / araştırmacı** (temel statik+modal) | ✅ %98 |
+| **Yapı mühendisi — ön tasarım** (RC/çelik bina, statik+modal+RS) | ✅ %85 |
+| **Yapı mühendisi — detay tasarım** (kesit tesirleri, drift, tasarım kontrolü) | ⚠️ %50 |
+| **Yüksek yapı / özel proje** (P-Δ, nonlineer, kapsamlı raporlama) | ⚠️ %30 |
+| **Köprü / endüstriyel tesis** (curved shell, moving load, cable) | ❌ %15 |
+
+### Öncelik önerisi
+
+**A) "Mühendise tam analiz aracı" (~3 gün):**
+1. Kesit tesirleri (M, V, N diyagramları) — **1-2 gün**
+2. Drift oranı hesabı — 1 gün
+3. Otomatik TBDY kombinasyonları — yarım gün
+
+Bittikten sonra kullanıcı SAP'tan aldığı modelin çoğunu bu araçta tamamlayabilir.
+
+**B) "Production-grade platform" (~5 gün):**
+1. Async jobs + SSE progress — 2 gün
+2. PDF rapor şablonu — 2 gün
+3. 3D viewer'a deformed shape + mod animasyonu — 1 gün
+

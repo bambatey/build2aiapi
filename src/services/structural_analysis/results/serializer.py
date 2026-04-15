@@ -43,6 +43,49 @@ def analysis_to_persistable(result: AnalysisResult) -> dict[str, Any]:
     }
 
 
+def case_element_forces_dict(
+    case, node_labels: dict[int, dict[str, str | None]] | None = None,
+) -> list[dict[str, Any]]:
+    """Kesit tesirlerini UI/Firestore için list[dict]'e çevir.
+
+    Her frame için özet + istasyon listesi. ``node_labels`` verilirse
+    uç düğüm aks/kat etiketleri de eklenir.
+    """
+    out: list[dict[str, Any]] = []
+    for ef in getattr(case, "element_forces", []) or []:
+        row: dict[str, Any] = {
+            "element_id": ef.element_id,
+            "length": _safe(ef.length),
+            "node_i": ef.node_i,
+            "node_j": ef.node_j,
+            "load_case": case.case_id,
+            "P_I": _safe(ef.P_I), "V2_I": _safe(ef.V2_I), "V3_I": _safe(ef.V3_I),
+            "T_I": _safe(ef.T_I), "M2_I": _safe(ef.M2_I), "M3_I": _safe(ef.M3_I),
+            "P_J": _safe(ef.P_J), "V2_J": _safe(ef.V2_J), "V3_J": _safe(ef.V3_J),
+            "T_J": _safe(ef.T_J), "M2_J": _safe(ef.M2_J), "M3_J": _safe(ef.M3_J),
+            "M3_span_ext": _safe(ef.M3_span_ext),
+            "M3_span_ext_x": _safe(ef.M3_span_ext_x),
+            "M2_span_ext": _safe(ef.M2_span_ext),
+            "M2_span_ext_x": _safe(ef.M2_span_ext_x),
+            "V2_max_abs": _safe(ef.V2_max_abs),
+            "V3_max_abs": _safe(ef.V3_max_abs),
+            "q_local": [_safe(q) for q in ef.q_local],
+            "stations": [
+                {
+                    "x": _safe(s.x), "x_rel": _safe(s.x_rel),
+                    "P": _safe(s.P), "V2": _safe(s.V2), "V3": _safe(s.V3),
+                    "T": _safe(s.T), "M2": _safe(s.M2), "M3": _safe(s.M3),
+                }
+                for s in ef.stations
+            ],
+        }
+        if node_labels:
+            row["i_labels"] = node_labels.get(ef.node_i, {})
+            row["j_labels"] = node_labels.get(ef.node_j, {})
+        out.append(row)
+    return out
+
+
 def _mode_to_persistable(mode) -> dict[str, Any]:
     return {
         "mode_no": mode.mode_no,
@@ -152,5 +195,6 @@ def _case_to_persistable(
         "kind": getattr(case, "kind", "case"),
         "displacements": case_displacements_dict(case, node_labels),
         "reactions": case_reactions_dict(case, node_labels),
+        "element_forces": case_element_forces_dict(case, node_labels),
         "summary": case_summary_dict(case),
     }

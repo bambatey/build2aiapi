@@ -151,6 +151,52 @@ class ModelPreviewDto(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------- element forces
+class StationForceDto(BaseModel):
+    """Bir eleman boyunca tek bir istasyondaki kesit tesirleri."""
+
+    x: float
+    x_rel: float
+    P: float
+    V2: float
+    V3: float
+    T: float
+    M2: float
+    M3: float
+
+
+class NodeLabelsDto(BaseModel):
+    axis_x: str | None = None
+    axis_y: str | None = None
+    level: str | None = None
+
+
+class ElementForcesDto(BaseModel):
+    """Tek bir frame elemanı için kesit tesirleri (bir yük durumunda)."""
+
+    element_id: int
+    load_case: str
+    length: float
+    node_i: int
+    node_j: int
+    # Uç değerleri (hızlı tablo okuması için)
+    P_I: float; V2_I: float; V3_I: float
+    T_I: float; M2_I: float; M3_I: float
+    P_J: float; V2_J: float; V3_J: float
+    T_J: float; M2_J: float; M3_J: float
+    # Açıklık içi extremum — dM/dx=0 noktası (yoksa 0)
+    M3_span_ext: float
+    M3_span_ext_x: float
+    M2_span_ext: float
+    M2_span_ext_x: float
+    V2_max_abs: float
+    V3_max_abs: float
+    q_local: list[float]        # [qx, qy, qz, mx, my, mz]
+    stations: list[StationForceDto]
+    i_labels: NodeLabelsDto | None = None
+    j_labels: NodeLabelsDto | None = None
+
+
 # -------------------------------------------------------------------- modes
 class ModeDto(BaseModel):
     """Modal analiz — tek bir mod. Kütle katılım oranları 0-1 arası."""

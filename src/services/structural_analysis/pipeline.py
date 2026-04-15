@@ -28,7 +28,14 @@ from .assembly import (
 )
 from .model.dto import CombinationDTO, ModelDTO
 from .parser import parse_s2k
-from .recovery import node_displacements, node_reactions
+from .recovery import (
+    ElementForces,
+    build_case_q_local,
+    combine_case_q_local,
+    compute_element_forces,
+    node_displacements,
+    node_reactions,
+)
 from .solver import StaticSolution, solve_static
 from .validation import validate_model
 
@@ -69,7 +76,9 @@ class CaseResult:
     displacements: dict[int, dict[str, float]]
     reactions: dict[int, dict[str, float]]
     raw: StaticSolution
-    kind: str = "case"     # "case" | "combination"
+    kind: str = "case"     # "case" | "combination" | "response_spectrum"
+    # Frame elemanları boyunca kesit tesirleri (P, V2, V3, T, M2, M3)
+    element_forces: list[ElementForces] = field(default_factory=list)
 
 
 @dataclass
@@ -163,15 +172,21 @@ def run_static_analysis(
     result = AnalysisResult(model=model)
     max_disp = 0.0
 
+    # Her base case için q_local sözlüğü (kesit tesirleri + kombinasyon için)
+    base_q_local: dict[str, dict] = {}
+
     # --- Base yük durumları
     for case_id in cases_to_solve:
         PS, RHS, US = load_vectors[case_id]
         sol = solve_static(case_id, K, PS, RHS, US, dof_map, diaphragm_transform)
         disp = node_displacements(sol.U, dof_map)
         reacts = node_reactions(sol.P, dof_map, model)
+        q_case = build_case_q_local(case_id, model)
+        base_q_local[case_id] = q_case
+        forces = compute_element_forces(sol.U, dof_map, model, q_case)
         result.cases[case_id] = CaseResult(
             case_id=case_id, displacements=disp, reactions=reacts,
-            raw=sol, kind="case",
+            raw=sol, kind="case", element_forces=forces,
         )
         max_disp = max(max_disp, _finite_max_abs(sol.U))
 
@@ -179,7 +194,9 @@ def run_static_analysis(
     for combo in model.combinations:
         if combo.id not in selected_combos:
             continue
-        combo_result = _combine(combo, result.cases, dof_map, model)
+        combo_result = _combine(
+            combo, result.cases, dof_map, model, base_q_local,
+        )
         if combo_result is not None:
             result.cases[combo.id] = combo_result
             max_disp = max(max_disp, _finite_max_abs(combo_result.raw.U))
@@ -231,9 +248,11 @@ def run_static_analysis(
                 raw = StaticSolution(case_id=case_id, U=rs.U, P=P)
                 disp = node_displacements(rs.U, dof_map)
                 reacts = node_reactions(P, dof_map, model)
+                # RS yükü düğümsel — frame üzerinde yayılı yük yok.
+                forces = compute_element_forces(rs.U, dof_map, model, None)
                 result.cases[case_id] = CaseResult(
                     case_id=case_id, displacements=disp, reactions=reacts,
-                    raw=raw, kind="response_spectrum",
+                    raw=raw, kind="response_spectrum", element_forces=forces,
                 )
                 max_disp = max(max_disp, _finite_max_abs(rs.U))
             except Exception as exc:
@@ -295,6 +314,7 @@ def _combine(
     base_cases: dict[str, CaseResult],
     dof_map,
     model: ModelDTO,
+    base_q_local: dict[str, dict] | None = None,
 ) -> CaseResult | None:
     """Lineer süperpozisyon: U_combo = Σ factor × U_case."""
     referenced = list(combo.factors.items())
@@ -320,7 +340,12 @@ def _combine(
     raw = StaticSolution(case_id=combo.id, U=U_combo, P=P_combo)
     disp = node_displacements(U_combo, dof_map)
     reacts = node_reactions(P_combo, dof_map, model)
+
+    # Kombinasyon için kesit tesirleri — q_local'ler de lineer birleştirilir
+    q_combo = combine_case_q_local(combo, base_q_local or {})
+    forces = compute_element_forces(U_combo, dof_map, model, q_combo)
+
     return CaseResult(
         case_id=combo.id, displacements=disp, reactions=reacts,
-        raw=raw, kind="combination",
+        raw=raw, kind="combination", element_forces=forces,
     )
