@@ -5,10 +5,15 @@ POST /api/projects/{pid}/chat/sessions                    → Yeni oturum
 GET  /api/chat/sessions/{sid}/messages?project_id=X       → Mesajlar
 POST /api/llm-proxy/chat/stream                           → AI streaming (SSE)
 """
+import logging
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from dependencies import get_current_user, get_uid
+
+logger = logging.getLogger(__name__)
 from models.dto import (
     BusinessLogicDto,
     ChatMessageDto,
@@ -16,7 +21,7 @@ from models.dto import (
     ChatSessionDto,
     ChatStreamRequest,
 )
-from repositories import chat_repository
+from repositories import analysis_repository, chat_repository
 from services import chat_service
 
 router = APIRouter(tags=["chat"])
@@ -119,6 +124,23 @@ async def chat_stream(
             content=last_user_msg["content"],
         )
 
+    # Analiz özeti: en son analizi bul, varsa Türkçe özetini AI'a ver
+    analysis_summary: str | None = None
+    if request.file_id:
+        try:
+            analyses = await analysis_repository.list_by_file(
+                uid, request.project_id, request.file_id,
+            )
+            # En yeni completed olan
+            latest = next(
+                (a for a in analyses if a.get("status") == "completed"),
+                None,
+            )
+            if latest:
+                analysis_summary = _format_analysis_summary(latest)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Analiz özeti çekilemedi: %s", exc)
+
     # Streaming response oluştur
     async def generate():
         import json as json_mod
@@ -128,6 +150,7 @@ async def chat_stream(
             messages=request.messages,
             model=request.model,
             file_context=request.file_context,
+            analysis_summary=analysis_summary,
         ):
             yield chunk
             # İçeriği biriktir (DB'ye kaydetmek için)
@@ -161,3 +184,30 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _format_analysis_summary(record: dict[str, Any]) -> str:
+    """Firestore analiz kaydından AI'a verilecek Türkçe özet çıkar."""
+    s = record.get("summary") or {}
+    lines = [
+        f"Analiz ID: {record.get('analysis_id', '?')}",
+        f"Durum: {record.get('status', '?')}"
+        + (f", {record.get('duration_ms')} ms" if record.get('duration_ms') else ''),
+        f"Düğüm: {s.get('n_nodes', '?')}, Frame: {s.get('n_frame_elements', '?')}, "
+        f"Shell: {s.get('n_shell_elements', '?')}",
+        f"Serbestlik: {s.get('n_dofs_free', '?')}/{s.get('n_dofs_total', '?')}",
+        f"Yük durumu: {s.get('n_load_cases', '?')}, "
+        f"Kombinasyon: {s.get('n_combinations', '?')}",
+    ]
+    max_d = s.get("max_displacement")
+    if max_d is not None:
+        lines.append(f"Max yer değiştirme: {max_d:.4f} m")
+    if s.get("n_modes"):
+        lines.append(
+            f"Modal: {s['n_modes']} mod, "
+            f"T1 = {s.get('fundamental_period', 0):.4f} s"
+        )
+    warnings = record.get("warnings") or []
+    if warnings:
+        lines.append(f"Uyarı sayısı: {len(warnings)}")
+    return "\n".join(lines)

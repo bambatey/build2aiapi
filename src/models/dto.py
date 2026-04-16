@@ -145,6 +145,7 @@ class ChatMessageDto(BaseModel):
 class ChatStreamRequest(BaseModel):
     session_id: str
     project_id: str
+    file_id: str | None = None                   # Analiz context'i için
     messages: list[dict[str, str]]  # [{role, content}]
     model: str = "anthropic/claude-sonnet-4-20250514"
     file_context: str | None = None  # Aktif .s2k dosya içeriği
