@@ -54,12 +54,20 @@ class AnalysisRepository:
         warnings: list[str],
         duration_ms: int,
         modes: list[dict[str, Any]] | None = None,
+        element_forces: dict[str, Any] | None = None,
         status: str = "completed",
         error: str | None = None,
     ) -> dict[str, Any]:
         analysis_id = f"an_{uuid.uuid4().hex[:12]}"
         now = datetime.utcnow()
         storage_paths: dict[str, str] = {}
+
+        # element_forces her zaman ayrı Storage blob'una yazılır — Firestore'a
+        # asla inline girmez (kombinasyon başına ~MB'lara çıkabiliyor).
+        if element_forces:
+            path = self._storage_path(uid, project_id, file_id, analysis_id, "forces")
+            await storage_service.upload_json_gzip(path, element_forces)
+            storage_paths["forces"] = path
 
         # Büyüklüğü hesapla — cases ve modes genelde büyük
         def _size(x) -> int:
@@ -103,6 +111,30 @@ class AnalysisRepository:
         }
         self._collection(uid, project_id, file_id).document(analysis_id).set(data)
         return data
+
+    async def get_forces(
+        self, uid: str, project_id: str, file_id: str, analysis_id: str,
+    ) -> dict[str, Any]:
+        """Kesit tesirleri blob'unu (varsa) Storage'dan getir.
+
+        ``{case_id: [element_forces_row, ...]}`` sözlüğü döner. Yoksa {} döner.
+        """
+        doc = (
+            self._collection(uid, project_id, file_id)
+            .document(analysis_id).get()
+        )
+        if not doc.exists:
+            return {}
+        record = doc.to_dict() or {}
+        paths = record.get("storage_paths") or {}
+        forces_path = paths.get("forces")
+        if not forces_path:
+            return {}
+        try:
+            return await storage_service.download_json_gzip(forces_path)
+        except Exception as exc:   # pragma: no cover
+            logger.error("forces gzip indirilemedi: %s", exc)
+            return {}
 
     async def get(
         self, uid: str, project_id: str, file_id: str, analysis_id: str,

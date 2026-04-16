@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 
 
 def analysis_to_persistable(result: AnalysisResult) -> dict[str, Any]:
-    """Analiz sonucunu Firestore'a yazılabilir sözlüğe çevir."""
+    """Analiz sonucunu Firestore'a yazılabilir sözlüğe çevir.
+
+    ``element_forces`` top-level ayrı bir key olarak döner (cases içine
+    gömülmez). Repository bunu ayrı bir Storage blob'una yazıp cases
+    payload'ını küçük tutar.
+    """
     # Düğüm ID → aks etiketleri sözlüğü (her recovery satırına eklenir)
     node_labels = {
         nid: {
@@ -32,13 +37,19 @@ def analysis_to_persistable(result: AnalysisResult) -> dict[str, Any]:
         }
         for nid, n in result.model.nodes.items()
     }
+    cases_dict = {}
+    forces_by_case: dict[str, list[dict[str, Any]]] = {}
+    for case_id, case in result.cases.items():
+        if case_id == "_empty":
+            continue
+        cases_dict[case_id] = _case_to_persistable(case, node_labels)
+        forces = case_element_forces_dict(case, node_labels)
+        if forces:
+            forces_by_case[case_id] = forces
     return {
         "summary": result.summary,
-        "cases": {
-            case_id: _case_to_persistable(case, node_labels)
-            for case_id, case in result.cases.items()
-            if case_id != "_empty"
-        },
+        "cases": cases_dict,
+        "element_forces": forces_by_case,
         "modes": [_mode_to_persistable(m) for m in result.modes],
     }
 
@@ -195,6 +206,5 @@ def _case_to_persistable(
         "kind": getattr(case, "kind", "case"),
         "displacements": case_displacements_dict(case, node_labels),
         "reactions": case_reactions_dict(case, node_labels),
-        "element_forces": case_element_forces_dict(case, node_labels),
         "summary": case_summary_dict(case),
     }

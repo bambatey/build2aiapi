@@ -190,6 +190,7 @@ async def trigger_analysis(
         summary=persistable["summary"],
         cases=persistable["cases"],
         modes=persistable["modes"],
+        element_forces=persistable.get("element_forces"),
         warnings=result.warnings,
         duration_ms=duration_ms,
         status="completed",
@@ -318,13 +319,20 @@ async def get_element_forces(
     element_id: int | None = Query(None),
     uid: str = Depends(get_uid),
 ):
-    """Frame eleman kesit tesirleri (P, V2, V3, T, M2, M3)."""
-    record = await _require(uid, project_id, file_id, analysis_id)
+    """Frame eleman kesit tesirleri (P, V2, V3, T, M2, M3).
+
+    Forces Storage blob'undan okunur (cases'e gömülmemiştir — büyük modellerde
+    cases payload'ını küçük tutmak için). Bu endpoint lazy-load'dur: frontend
+    sadece "Kesit Tesirleri" tab'ı açıldığında çağırır.
+    """
+    forces_by_case = await analysis_repository.get_forces(
+        uid, project_id, file_id, analysis_id,
+    )
     out: list[ElementForcesDto] = []
-    for case_id, case_data in (record.get("cases") or {}).items():
+    for case_id, rows in (forces_by_case or {}).items():
         if load_case and case_id != load_case:
             continue
-        for ef in case_data.get("element_forces", []) or []:
+        for ef in rows or []:
             if element_id is not None and ef.get("element_id") != element_id:
                 continue
             out.append(ElementForcesDto(**ef))

@@ -271,6 +271,9 @@ def run_static_analysis(
     n_rs = sum(
         1 for c in result.cases.values() if c.kind == "response_spectrum"
     )
+    available = sorted(
+        cid for cid in result.cases if cid != "_empty"
+    )
     result.summary = {
         "n_nodes": len(model.nodes),
         "n_frame_elements": len(model.frame_elements),
@@ -283,6 +286,7 @@ def run_static_analysis(
         "n_modes": len(result.modes),
         "fundamental_period": periods[0] if periods else 0.0,
         "max_displacement": max_disp,
+        "available_cases": available,
     }
     result.warnings = warnings_list
     return result

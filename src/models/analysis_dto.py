@@ -61,6 +61,9 @@ class ModelSummaryDto(BaseModel):
     n_dofs_total: int
     n_load_cases: int
     max_displacement: float
+    # Çözümde kullanılmış/mevcut tüm case+combo id'leri — frontend lazy
+    # tablo yüklemeleri için case seçicinin kaynağı.
+    available_cases: list[str] = []
 
 
 class AnalysisStatusDto(BaseModel):
