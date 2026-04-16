@@ -31,11 +31,12 @@ import numpy as np
 from ..assembly.dof_numbering import DofMap
 from ..assembly.load_assembler import (
     _distribute_area_uniform_to_frames,
-    _distributed_to_local_q,
-    _self_weight_local_q,
+    _distributed_to_local_q_from_kernel,
+    _local_load_vector,
+    _self_weight_local_q_from_kernel,
 )
-from ..elements import FrameElement3D
-from ..model.dto import CombinationDTO, FrameSectionDTO, ModelDTO
+from ..elements import FrameKernel, build_frame_kernels
+from ..model.dto import CombinationDTO, ModelDTO
 
 
 @dataclass
@@ -84,15 +85,21 @@ class ElementForces:
 
 # ----------------------------------------------------- per-case q_local
 def build_case_q_local(
-    case_id: str, model: ModelDTO,
+    case_id: str,
+    model: ModelDTO,
+    frame_kernels: dict[int, FrameKernel] | None = None,
 ) -> dict[int, np.ndarray]:
     """Bir yük durumunun her frame için toplam lokal yayılı yükü.
 
     Distributed + area-uniform-to-frame + self-weight birleşik.
+    ``frame_kernels`` cache'i verilirse TE/ρgA yeniden hesaplanmaz.
     """
     case = model.load_cases.get(case_id)
     if case is None:
         return {}
+    if frame_kernels is None:
+        frame_kernels = build_frame_kernels(model)
+
     per_el: dict[int, list] = {}
     for dl in case.distributed_loads:
         per_el.setdefault(dl.element_id, []).append(dl)
@@ -101,26 +108,14 @@ def build_case_q_local(
 
     out: dict[int, np.ndarray] = {}
     sw_factor = case.self_weight_factor
-    for el_id, el_dto in model.frame_elements.items():
-        section = model.sections.get(el_dto.section_id)
-        material = model.materials.get(el_dto.material_id)
-        if not isinstance(section, FrameSectionDTO) or material is None:
-            continue
-        node_i = model.nodes.get(el_dto.nodes[0])
-        node_j = model.nodes.get(el_dto.nodes[1])
-        if node_i is None or node_j is None:
-            continue
-        element = FrameElement3D(
-            element=el_dto, node_i=node_i, node_j=node_j,
-            section=section, material=material,
-        )
+    for el_id, kernel in frame_kernels.items():
         q = np.zeros(6)
         for dl in per_el.get(el_id, []):
-            q_dl = _distributed_to_local_q(dl, element)
+            q_dl = _distributed_to_local_q_from_kernel(dl, kernel)
             if q_dl is not None:
                 q += q_dl
         if sw_factor:
-            q += _self_weight_local_q(element, sw_factor)
+            q += _self_weight_local_q_from_kernel(kernel, sw_factor)
         if np.any(q):
             out[el_id] = q
     return out
@@ -143,6 +138,7 @@ def combine_case_q_local(
 
 
 # --------------------------------------------------- station formülleri
+# RUST_KERNEL_CANDIDATE — Tier 1 (her frame × her case × her station)
 def _station(
     x: float, x_rel: float, f_local: np.ndarray, q: np.ndarray,
 ) -> StationForce:
@@ -160,6 +156,7 @@ def _station(
     )
 
 
+# RUST_KERNEL_CANDIDATE — Tier 1 (per frame × per case)
 def _interior_extremum(
     f_local_i: float, f_local_force: float,
     q_force: float, q_moment: float,
@@ -192,46 +189,35 @@ def compute_element_forces(
     dof_map: DofMap,
     model: ModelDTO,
     q_local_per_element: dict[int, np.ndarray] | None = None,
-    n_stations: int = 5,
+    n_stations: int = 3,
+    frame_kernels: dict[int, FrameKernel] | None = None,
 ) -> list[ElementForces]:
     """Verilen sistem U vektörü ve q_local sözlüğü için kesit tesirleri.
 
     ``q_local_per_element``: her frame için 6-uzunluklu yayılı yük vektörü
     (build_case_q_local / combine_case_q_local ile hazırlanır). Yoksa q=0.
-    ``n_stations``: I..J arası örnekleme (min 2, varsayılan 5 — çeyrekler).
+    ``n_stations``: I..J arası örnekleme (min 2, varsayılan 3 — I/mid/J;
+    docs/architecture/01-performance.md Faz 1 önerisi).
+    ``frame_kernels``: pre-computed cache; yoksa oluşturulur.
     """
     q_map = q_local_per_element or {}
     n_stations = max(2, n_stations)
+    if frame_kernels is None:
+        frame_kernels = build_frame_kernels(model)
     out: list[ElementForces] = []
 
-    for el_id, el_dto in model.frame_elements.items():
-        section = model.sections.get(el_dto.section_id)
-        material = model.materials.get(el_dto.material_id)
-        if not isinstance(section, FrameSectionDTO) or material is None:
-            continue
-        try:
-            node_i = model.nodes[el_dto.nodes[0]]
-            node_j = model.nodes[el_dto.nodes[1]]
-        except KeyError:
-            continue
-        element = FrameElement3D(
-            element=el_dto, node_i=node_i, node_j=node_j,
-            section=section, material=material,
-        )
-        L = element.length
-        if L <= 0:
-            continue
+    for el_id, kernel in frame_kernels.items():
+        el_dto = kernel.element
+        L = kernel.length
 
         q = q_map.get(el_id, np.zeros(6))
 
-        T = element.local_to_global_transform()
         code = dof_map.element_code(el_dto.nodes[0], el_dto.nodes[1])
         u_global = np.asarray([U[c] for c in code], dtype=float)
-        u_local = T @ u_global
+        u_local = kernel.T @ u_global
 
-        K_local = element.local_stiffness_with_releases()
-        q_eq = element.local_load_vector(q.tolist())
-        f_local = K_local @ u_local - q_eq
+        q_eq = _local_load_vector(q, L)
+        f_local = kernel.K_local_released @ u_local - q_eq
 
         # NaN/inf guard — singular K çözümleri pipeline başka yerde
         # logluyor; buradaki değerleri 0'a sanitize ediyoruz.

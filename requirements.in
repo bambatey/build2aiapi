@@ -23,6 +23,9 @@ dspy
 numpy>=1.26
 scipy>=1.13
 
+# Binary Storage offload (docs/architecture/01-performance.md Faz 1)
+msgpack>=1.0,<2.0
+
 # Test
 pytest>=8.0
 

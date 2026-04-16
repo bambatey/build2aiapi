@@ -26,6 +26,7 @@ from .assembly import (
     build_diaphragm_transform,
     number_dofs,
 )
+from .elements import FrameKernel, build_frame_kernels
 from .model.dto import CombinationDTO, ModelDTO
 from .parser import parse_s2k
 from .recovery import (
@@ -125,9 +126,13 @@ def run_static_analysis(
             len(report.errors),
         )
 
+    # Frame cache — K_local/T/TE/ρgA frame başına TEK sefer hesaplanır,
+    # bütün case/combo/recovery çağrıları bu cache'i kullanır (Faz 1
+    # optimizasyonu, docs/architecture/01-performance.md Bulgu 2).
     dof_map = number_dofs(model)
-    K = assemble_stiffness(model, dof_map)
-    load_vectors = assemble_load_vectors(model, dof_map)
+    frame_kernels = build_frame_kernels(model)
+    K = assemble_stiffness(model, dof_map, frame_kernels)
+    load_vectors = assemble_load_vectors(model, dof_map, frame_kernels)
     diaphragm_transform = build_diaphragm_transform(model, dof_map)
     if diaphragm_transform:
         logger.info(
@@ -181,9 +186,11 @@ def run_static_analysis(
         sol = solve_static(case_id, K, PS, RHS, US, dof_map, diaphragm_transform)
         disp = node_displacements(sol.U, dof_map)
         reacts = node_reactions(sol.P, dof_map, model)
-        q_case = build_case_q_local(case_id, model)
+        q_case = build_case_q_local(case_id, model, frame_kernels)
         base_q_local[case_id] = q_case
-        forces = compute_element_forces(sol.U, dof_map, model, q_case)
+        forces = compute_element_forces(
+            sol.U, dof_map, model, q_case, frame_kernels=frame_kernels,
+        )
         result.cases[case_id] = CaseResult(
             case_id=case_id, displacements=disp, reactions=reacts,
             raw=sol, kind="case", element_forces=forces,
@@ -195,7 +202,7 @@ def run_static_analysis(
         if combo.id not in selected_combos:
             continue
         combo_result = _combine(
-            combo, result.cases, dof_map, model, base_q_local,
+            combo, result.cases, dof_map, model, base_q_local, frame_kernels,
         )
         if combo_result is not None:
             result.cases[combo.id] = combo_result
@@ -249,7 +256,9 @@ def run_static_analysis(
                 disp = node_displacements(rs.U, dof_map)
                 reacts = node_reactions(P, dof_map, model)
                 # RS yükü düğümsel — frame üzerinde yayılı yük yok.
-                forces = compute_element_forces(rs.U, dof_map, model, None)
+                forces = compute_element_forces(
+                    rs.U, dof_map, model, None, frame_kernels=frame_kernels,
+                )
                 result.cases[case_id] = CaseResult(
                     case_id=case_id, displacements=disp, reactions=reacts,
                     raw=raw, kind="response_spectrum", element_forces=forces,
@@ -319,6 +328,7 @@ def _combine(
     dof_map,
     model: ModelDTO,
     base_q_local: dict[str, dict] | None = None,
+    frame_kernels: dict[int, FrameKernel] | None = None,
 ) -> CaseResult | None:
     """Lineer süperpozisyon: U_combo = Σ factor × U_case."""
     referenced = list(combo.factors.items())
@@ -347,7 +357,9 @@ def _combine(
 
     # Kombinasyon için kesit tesirleri — q_local'ler de lineer birleştirilir
     q_combo = combine_case_q_local(combo, base_q_local or {})
-    forces = compute_element_forces(U_combo, dof_map, model, q_combo)
+    forces = compute_element_forces(
+        U_combo, dof_map, model, q_combo, frame_kernels=frame_kernels,
+    )
 
     return CaseResult(
         case_id=combo.id, displacements=disp, reactions=reacts,

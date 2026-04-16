@@ -2,9 +2,15 @@
 
 Küçük modellerde tüm analiz verisi tek dokümanda yaşar. Büyük
 modellerde (Firestore 1MB doküman limitini aşan) ``cases`` ve
-``modes`` bölümleri otomatik olarak Firebase Storage'a gzip JSON
-olarak yazılır; Firestore dokümanında yalnızca özet + storage path'ler
-kalır. Okuma sırasında şeffaf olarak Storage'dan geri inflate edilir.
+``modes`` bölümleri otomatik olarak Firebase Storage'a offload
+edilir; Firestore dokümanında yalnızca özet + storage path'ler kalır.
+Okuma sırasında şeffaf olarak Storage'dan geri inflate edilir.
+
+Storage format'ı (docs/architecture/01-performance.md Faz 1):
+    Yeni kayıtlar  → ``<kind>.mpack.gz`` (msgpack + gzip; ~3× küçük, ~5× hızlı)
+    Eski kayıtlar  → ``<kind>.json.gz`` (geriye uyumluluk için okumada desteklenir)
+``storage_service.download_blob()`` uzantıya bakarak doğru decoder'ı
+seçer — caller bilmesine gerek yok.
 """
 
 from __future__ import annotations
@@ -24,6 +30,9 @@ logger = logging.getLogger(__name__)
 # Güvenli payoff eşiği: 800 KB (metadata + marshalling payı).
 _OFFLOAD_THRESHOLD_BYTES = 800_000
 
+# Yeni kayıtlar msgpack+gzip. Eski ``.json.gz`` okumada hâlâ desteklenir.
+_BLOB_EXT = ".mpack.gz"
+
 
 class AnalysisRepository:
 
@@ -40,7 +49,7 @@ class AnalysisRepository:
                       analysis_id: str, kind: str) -> str:
         return (
             f"users/{uid}/projects/{project_id}/files/{file_id}"
-            f"/analyses/{analysis_id}/{kind}.json.gz"
+            f"/analyses/{analysis_id}/{kind}{_BLOB_EXT}"
         )
 
     async def create(
@@ -66,10 +75,12 @@ class AnalysisRepository:
         # asla inline girmez (kombinasyon başına ~MB'lara çıkabiliyor).
         if element_forces:
             path = self._storage_path(uid, project_id, file_id, analysis_id, "forces")
-            await storage_service.upload_json_gzip(path, element_forces)
+            await storage_service.upload_msgpack_gzip(path, element_forces)
             storage_paths["forces"] = path
 
-        # Büyüklüğü hesapla — cases ve modes genelde büyük
+        # Büyüklüğü hesapla — cases ve modes genelde büyük.
+        # json.dumps boyut tahmini yeterli; msgpack genelde daha küçüktür,
+        # eşik aşılıyorsa zaten offload edilmeli.
         def _size(x) -> int:
             return len(json.dumps(x, default=str).encode("utf-8"))
 
@@ -84,12 +95,12 @@ class AnalysisRepository:
             )
             if cases:
                 path = self._storage_path(uid, project_id, file_id, analysis_id, "cases")
-                await storage_service.upload_json_gzip(path, cases)
+                await storage_service.upload_msgpack_gzip(path, cases)
                 storage_paths["cases"] = path
                 cases = {}   # Firestore'a boş yaz
             if modes:
                 path = self._storage_path(uid, project_id, file_id, analysis_id, "modes")
-                await storage_service.upload_json_gzip(path, modes)
+                await storage_service.upload_msgpack_gzip(path, modes)
                 storage_paths["modes"] = path
                 modes = []
 
@@ -131,9 +142,9 @@ class AnalysisRepository:
         if not forces_path:
             return {}
         try:
-            return await storage_service.download_json_gzip(forces_path)
+            return await storage_service.download_blob(forces_path)
         except Exception as exc:   # pragma: no cover
-            logger.error("forces gzip indirilemedi: %s", exc)
+            logger.error("forces blob indirilemedi: %s", exc)
             return {}
 
     async def get(
@@ -154,18 +165,18 @@ class AnalysisRepository:
             paths = record.get("storage_paths") or {}
             if paths.get("cases") and not record.get("cases"):
                 try:
-                    record["cases"] = await storage_service.download_json_gzip(
+                    record["cases"] = await storage_service.download_blob(
                         paths["cases"]
                     )
                 except Exception as exc:   # pragma: no cover
-                    logger.error("cases gzip indirilemedi: %s", exc)
+                    logger.error("cases blob indirilemedi: %s", exc)
             if paths.get("modes") and not record.get("modes"):
                 try:
-                    record["modes"] = await storage_service.download_json_gzip(
+                    record["modes"] = await storage_service.download_blob(
                         paths["modes"]
                     )
                 except Exception as exc:   # pragma: no cover
-                    logger.error("modes gzip indirilemedi: %s", exc)
+                    logger.error("modes blob indirilemedi: %s", exc)
         return record
 
     async def list_by_file(
