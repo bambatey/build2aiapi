@@ -307,10 +307,7 @@ async def get_modes(
 
 
 # ------------------------------------------------- GET element forces
-@router.get(
-    "/analyses/{analysis_id}/forces",
-    response_model=BusinessLogicDto[list[ElementForcesDto]],
-)
+@router.get("/analyses/{analysis_id}/forces")
 async def get_element_forces(
     project_id: str,
     file_id: str,
@@ -324,19 +321,24 @@ async def get_element_forces(
     Forces Storage blob'undan okunur (cases'e gömülmemiştir — büyük modellerde
     cases payload'ını küçük tutmak için). Bu endpoint lazy-load'dur: frontend
     sadece "Kesit Tesirleri" tab'ı açıldığında çağırır.
+
+    Performans notu: ``response_model`` **yok**. 43K+ satırlık payload'larda
+    Pydantic per-row validation ~90 saniye eklediği ölçülmüştür; storage'dan
+    gelen dict doğrudan döndürülür. Filtreleme (``load_case``, ``element_id``)
+    iç tarafta yapılır — frontend her zaman case filtresi geçirmeli.
     """
     forces_by_case = await analysis_repository.get_forces(
         uid, project_id, file_id, analysis_id,
     )
-    out: list[ElementForcesDto] = []
+    out: list[dict] = []
     for case_id, rows in (forces_by_case or {}).items():
         if load_case and case_id != load_case:
             continue
         for ef in rows or []:
             if element_id is not None and ef.get("element_id") != element_id:
                 continue
-            out.append(ElementForcesDto(**ef))
-    return BusinessLogicDto(success=True, data=out)
+            out.append(ef)
+    return {"success": True, "data": out}
 
 
 # ------------------------------------------------------- GET reactions

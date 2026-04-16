@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from config import app_config
 from services.firebase_service import firebase_service
@@ -59,6 +60,12 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# ---! Response compression — 46 MB /forces response'unu wire'da %85-90
+# sıkıştırır. Cloudflare/nginx zaten yapıyor olabilir ama backend seviyesinde
+# de ekleyerek garanti altına alıyoruz. minimum_size=1000 → küçük response'lar
+# etkilenmez.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # ---! CORS
 app.add_middleware(
