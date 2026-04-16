@@ -158,12 +158,17 @@ class ChatService:
                     )
 
             elif intent.action == "edit_model":
-                # MVP: şu an edit modu kapalı; kullanıcıya nazikçe bildir.
-                note = (
-                    "\n\n_Not: Mevcut modelde inline düzenleme yakında geliyor. "
-                    "Şimdilik yeni bir oluşturma isteği verebilirsin._"
-                )
-                yield _delta(note)
+                edit_result = _apply_edit(file_context, intent.edit_op)
+                if edit_result is None:
+                    yield _delta(
+                        "\n\n_⚠️ Bu düzenleme için yeterli bilgi yok ya da işlem desteklenmiyor._"
+                    )
+                else:
+                    new_text, info = edit_result
+                    summary = _format_edit_summary(intent.edit_op, info)
+                    yield _delta(summary)
+                    yield _file_update(new_text)
+                    logger.info("edit_model uygulandı: %s", info)
 
             # "query" için ek bir şey yapmaya gerek yok — sadece response yeterli.
 
@@ -247,6 +252,78 @@ async def _streamed(text: str, chunk_size: int = 80):
     for i in range(0, len(text), chunk_size):
         yield _delta(text[i:i + chunk_size])
         await asyncio.sleep(0.015)
+
+
+def _apply_edit(current_file: str | None, edit_op):
+    """Intent edit_op'una göre uygun editor fonksiyonunu çağır.
+
+    Return: (new_s2k_text, info_dict) ya da None (uygulanamadı).
+    """
+    from services.structural_generator import (
+        EditError,
+        add_stories,
+        change_beam_loads,
+        change_concrete_grade,
+        change_section_size,
+    )
+    if not current_file or current_file in ("", "Dosya yok"):
+        return None
+    if edit_op is None:
+        return None
+    try:
+        if edit_op.op == "add_stories":
+            n = edit_op.n_stories or 1
+            return add_stories(current_file, n=n, story_h=edit_op.new_story_h_m)
+        if edit_op.op == "change_concrete_grade":
+            if edit_op.new_fck_mpa is None:
+                return None
+            return change_concrete_grade(current_file, edit_op.new_fck_mpa)
+        if edit_op.op == "change_section_size":
+            return change_section_size(
+                current_file,
+                kind=edit_op.section_kind,
+                t2=edit_op.new_t2_m,
+                t3=edit_op.new_t3_m,
+            )
+        if edit_op.op == "change_beam_loads":
+            if edit_op.load_pattern is None or edit_op.new_q_knm is None:
+                return None
+            return change_beam_loads(current_file, edit_op.load_pattern, edit_op.new_q_knm)
+    except EditError as exc:
+        logger.warning("Edit başarısız: %s", exc)
+        return None
+    return None
+
+
+def _format_edit_summary(edit_op, info: dict) -> str:
+    """UI için Türkçe edit özeti."""
+    if edit_op is None:
+        return ""
+    op = edit_op.op
+    if op == "add_stories":
+        return (
+            f"\n\n### ✅ {info.get('added_stories', '?')} kat eklendi\n"
+            f"- Yeni düğüm: {info.get('added_nodes', '?')}, "
+            f"yeni frame: {info.get('added_frames', '?')}\n"
+            f"- Yeni toplam yükseklik: {info.get('z_top_after', '?')} m\n"
+        )
+    if op == "change_concrete_grade":
+        return (
+            f"\n\n### ✅ Beton sınıfı C{info.get('new_fck_mpa', '?')}'e güncellendi\n"
+            f"- Etkilenen materyal: {', '.join(info.get('updated_materials', []) or ['—'])}\n"
+        )
+    if op == "change_section_size":
+        return (
+            f"\n\n### ✅ Kesit '{info.get('section', '?')}' güncellendi\n"
+            f"- Yeni boyut: {info.get('t2', '?')} × {info.get('t3', '?')} m\n"
+        )
+    if op == "change_beam_loads":
+        return (
+            f"\n\n### ✅ {info.get('load_pattern', '?')} yükü güncellendi\n"
+            f"- Yeni şiddet: {info.get('new_q_knm', '?')} kN/m\n"
+            f"- Etkilenen kiriş yükü satırı: {info.get('updated', '?')}\n"
+        )
+    return ""
 
 
 def _params_from_intent(p) -> "RCFrameParams":  # type: ignore[name-defined]

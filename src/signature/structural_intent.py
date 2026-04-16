@@ -47,6 +47,41 @@ class RCFrameParamsDto(BaseModel):
     live_q_knm: Optional[float] = Field(default=None, description="Kiriş yayılı hareketli yükü kN/m (default: 2.0)")
 
 
+# --------------------------------------------------------------------- edit ops
+class ModelEditOp(BaseModel):
+    """Mevcut modelde uygulanacak deterministik düzenleme operasyonu.
+
+    Kategoriler:
+      add_stories          → en üstüne N kat ekle (story_h opsiyonel; verilmezse mevcut kat yüksekliği kullanılır)
+      change_concrete_grade → tüm Concrete materyallerin sınıfını değiştir
+      change_section_size  → bir kesitin boyutlarını değiştir (kolon ya da kiriş)
+      change_beam_loads    → kirişlerdeki belirli yük pattern'ini güncelle
+    """
+
+    op: Literal[
+        "add_stories",
+        "change_concrete_grade",
+        "change_section_size",
+        "change_beam_loads",
+    ] = Field(description="Uygulanacak düzenleme türü")
+
+    # add_stories
+    n_stories: Optional[int] = Field(default=None, description="Eklenecek kat sayısı (op=add_stories)")
+    new_story_h_m: Optional[float] = Field(default=None, description="Yeni katların yüksekliği (m). Verilmezse mevcut kat yüksekliği.")
+
+    # change_concrete_grade
+    new_fck_mpa: Optional[int] = Field(default=None, description="Yeni beton sınıfı fck (MPa). 20,25,30,35,40,45,50.")
+
+    # change_section_size
+    section_kind: Optional[Literal["column", "beam"]] = Field(default=None, description="Hangi tür kesit (column ya da beam)")
+    new_t2_m: Optional[float] = Field(default=None, description="Yeni kesit genişliği t2 (m). Kare kolonsa = ebat.")
+    new_t3_m: Optional[float] = Field(default=None, description="Yeni kesit yüksekliği t3 (m). Kare kolonsa = ebat.")
+
+    # change_beam_loads
+    load_pattern: Optional[Literal["DEAD", "LIVE"]] = Field(default=None, description="Hangi yük pattern'i")
+    new_q_knm: Optional[float] = Field(default=None, description="Yeni yayılı yük şiddeti (kN/m)")
+
+
 # --------------------------------------------------------------------- signature
 class StructuralIntent(BaseModel):
     """AI'ın kullanıcı mesajından çıkardığı niyet + parametreler."""
@@ -63,9 +98,13 @@ class StructuralIntent(BaseModel):
         default=None,
         description="action='create_rc_frame' ise parametreler. Belirtilmeyenler default olur.",
     )
+    edit_op: Optional[ModelEditOp] = Field(
+        default=None,
+        description="action='edit_model' ise yapılacak deterministik düzenleme.",
+    )
     edit_description: Optional[str] = Field(
         default=None,
-        description="action='edit_model' ise, yapılacak değişikliğin kısa Türkçe tarifi.",
+        description="Edit'in Türkçe kısa tarifi (UI'da göstermek için).",
     )
 
 
@@ -80,9 +119,22 @@ class StructuralChatV2(dspy.Signature):
     1. Kullanıcı "yeni bina", "oluştur", "modelle", "çerçeve yap", "3x4 2 katlı",
        "RC frame", "betonarme çerçeve" gibi yaratma komutları veriyorsa →
        action="create_rc_frame". Cümledeki sayıları parametrelere çevir.
-    2. Kullanıcı mevcut modeli değiştirmek istiyorsa (ör. "kolonları 50x50 yap",
-       "bir kat daha ekle", "beton sınıfını C35 yap", "kirişleri güçlendir") →
-       action="edit_model" ve edit_description ile kısa açıklama.
+    2. Kullanıcı mevcut modeli değiştirmek istiyorsa →
+       action="edit_model" + edit_op (ZORUNLU). Desteklenen op'lar:
+         - "5 kat daha ekle", "3 kat çık", "üstüne kat at" →
+           op="add_stories", n_stories=5 (vs)
+         - "C35 beton yap", "beton sınıfını C40 yap" →
+           op="change_concrete_grade", new_fck_mpa=35
+         - "kolonları 50x50 yap", "kolon boyutu 0.45" →
+           op="change_section_size", section_kind="column", new_t2_m=0.5, new_t3_m=0.5
+         - "kirişleri 30x70 yap" →
+           op="change_section_size", section_kind="beam", new_t2_m=0.3, new_t3_m=0.7
+         - "ölü yükü 6'ya çıkar", "DEAD load 8 kN/m" →
+           op="change_beam_loads", load_pattern="DEAD", new_q_knm=6
+         - "canlı yükü 4 kN/m yap" →
+           op="change_beam_loads", load_pattern="LIVE", new_q_knm=4
+       Desteklenmeyen edit (örn: "kolonları kaldır", "duvar ekle") için
+       op'u en yakın desteklenen değere düşür YA DA action="query" yap.
     3. Kullanıcı soru soruyorsa (ör. "bu modelde max yer değiştirme kaç?",
        "yönetmeliğe uygun mu?", "deprem kontrolü yap") → action="query".
 
