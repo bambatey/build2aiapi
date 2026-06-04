@@ -23,5 +23,8 @@ dspy
 numpy>=1.26
 scipy>=1.13
 
+# CAD export (services/cad_export) — DXF generation
+ezdxf>=1.3
+
 # Test
 pytest>=8.0
