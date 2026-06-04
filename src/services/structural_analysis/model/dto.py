@@ -57,6 +57,12 @@ class FrameSectionDTO(BaseModel):
     Iz: float = 0.0                   # z ekseni etrafı eğilme atalet
     J: float = 0.0                    # Burulma atalet momenti (Ix)
     Iyz: float = 0.0                  # Asimetrik kesit çarpım atalet
+    # CAD export için gerekli kesit bilgisi (SAP2000 FRAME SECTION PROPERTIES 01)
+    shape: str = ""                   # "Rectangular", "Circle", "I/Wide Flange", ...
+    t2: float = 0.0                   # Lokal 2 yönü kalınlığı (genişlik). Rectangular için b.
+    t3: float = 0.0                   # Lokal 3 yönü kalınlığı (yükseklik). Rectangular için h.
+    is_column: bool = False           # SAP ConcCol=Yes
+    is_beam: bool = False              # SAP ConcBeam=Yes
 
 
 class ShellSectionDTO(BaseModel):
@@ -65,6 +71,7 @@ class ShellSectionDTO(BaseModel):
     id: str
     kind: Literal["shell"] = "shell"
     thickness: float
+    shell_type: str = ""              # "Slab", "Wall", "Shell-Thin", ...
 
 
 SectionDTO = Annotated[

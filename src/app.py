@@ -9,6 +9,9 @@ from fastapi.middleware.gzip import GZipMiddleware
 from config import app_config
 from services.firebase_service import firebase_service
 
+# Import dependencies'ı erkenden tut — bypass log'u app boot'ta düşmeli
+import dependencies  # noqa: F401
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,15 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup: Firebase + DSPy init / Shutdown: cleanup."""
     logger.info("Uygulama başlatılıyor...")
+
+    # DEV bypass uyarısı — kazayla prod'da açılmasın
+    if app_config.dev_auth_bypass:
+        logger.warning(
+            "⚠️  DEV_AUTH_BYPASS aktif — tüm endpoint'ler kimlik doğrulama "
+            "yapmadan fake uid (%s) kullanacak. ASLA production'da çalıştırmayın.",
+            app_config.dev_fake_uid,
+        )
+
     firebase_service.initialize()
     logger.info("Firebase Admin SDK hazır")
 
@@ -80,7 +92,9 @@ app.add_middleware(
 from routers import (
     analysis_router,
     auth_router,
+    cad_export_router,
     chat_router,
+    design_router,
     documents_router,
     files_router,
     projects_router,
@@ -90,6 +104,8 @@ app.include_router(auth_router)
 app.include_router(projects_router)
 app.include_router(files_router)
 app.include_router(analysis_router)
+app.include_router(cad_export_router)
+app.include_router(design_router)
 app.include_router(chat_router)
 app.include_router(documents_router)
 

@@ -38,6 +38,19 @@ class AppConfig(BaseSettings):
         description="İzin verilen CORS origin'leri",
     )
 
+    # ---! DEV-ONLY auth bypass
+    # True ise tüm korumalı endpoint'ler Authorization header'ı beklemez,
+    # sabit bir "dev" kullanıcısı geri döner. ASLA production'da true olmaz.
+    # Aktif etmek için: ortam değişkeni `DEV_AUTH_BYPASS=true`.
+    dev_auth_bypass: bool = Field(
+        default=False,
+        description="DEV-ONLY: auth tamamen atlanır, fake uid kullanılır",
+    )
+    dev_fake_uid: str = Field(
+        default="dev-user-1",
+        description="Bypass aktifken get_uid bu değeri döner",
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

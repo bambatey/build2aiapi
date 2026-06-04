@@ -332,6 +332,7 @@ class S2KParser:
             if not sid:
                 continue
             # SAP: I33 = eğilme etrafı 3-3 (kuvvetli), I22 = 2-2 (zayıf), TorsConst = J
+            # ConcCol/ConcBeam: kolon/kiriş ayrımı için SAP flag'leri (CAD export için kritik)
             model.sections[sid] = FrameSectionDTO(
                 id=sid,
                 A=_safe(row.get("Area")),
@@ -339,6 +340,11 @@ class S2KParser:
                 Iz=_safe(row.get("I33")),
                 J=_safe(row.get("TorsConst")),
                 Iyz=_safe(row.get("I23")),
+                shape=(row.get("Shape") or "").strip(),
+                t2=_safe(row.get("t2")),
+                t3=_safe(row.get("t3")),
+                is_column=(row.get("ConcCol") or "").strip().lower() == "yes",
+                is_beam=(row.get("ConcBeam") or "").strip().lower() == "yes",
             )
 
     def _parse_shell_sections(self, tables, model: ModelDTO) -> None:
@@ -347,7 +353,11 @@ class S2KParser:
             if not sid:
                 continue
             thickness = _safe(row.get("Thickness"))
-            model.sections[sid] = ShellSectionDTO(id=sid, thickness=thickness)
+            model.sections[sid] = ShellSectionDTO(
+                id=sid,
+                thickness=thickness,
+                shell_type=(row.get("Type") or "").strip(),
+            )
 
     # ----------------------------------------------------------- nodes / dofs
     def _parse_nodes(self, tables, model: ModelDTO) -> None:

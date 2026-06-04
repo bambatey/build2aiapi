@@ -26,6 +26,9 @@ scipy>=1.13
 # Binary Storage offload (docs/architecture/01-performance.md Faz 1)
 msgpack>=1.0,<2.0
 
+# CAD export (services/cad_export) — DXF generation
+ezdxf>=1.3
+
 # Test
 pytest>=8.0
 
